@@ -11,11 +11,14 @@
 
 #include "appfw_mcp.h"
 #include "appfw_net.h"
+#include "appfw_portal.h"
 #include "appfw_netlist.h"
 #include "appfw_storage.h"
 #include "appfw_ui.h"   // APPFW_MENU_ITEM_* 使能位(只用位值,不接 UI)
 #include "bsp_battery.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "kbmic_action.h"
 #include "kbmic_hid.h"
 #include "kbmic_store.h"
@@ -514,6 +517,44 @@ static int tool_wifi_remove(cJSON *args, appfw_mcp_resp_t *resp)
     return 0;
 }
 
+// 管理页(网页设置)按需开关:空闲堆紧张(httpd 要 ~10KB),不常驻。
+// start 只起 HTTP(设备保持在线,AP 不开);完整热点配网走设置菜单。
+static int tool_web_start(cJSON *args, appfw_mcp_resp_t *resp)
+{
+    (void)args;
+    appfw_net_status_t st;
+    appfw_net_get_status(&st);
+    if (st.ip[0] == '\0') {
+        appfw_mcp_resp_addf(resp, "设备离线,网页不可用;请用设置菜单的『开启配网』配热点");
+        return 1;
+    }
+    // 内存门槛:httpd 任务+控制块要 ~10KB。BLE+WiFi 共存下空闲堆紧张,
+    // 硬起会把设备送进 OOM 重启(2026-10-06 真机踩坑),先验后动。
+    const size_t heap_now = esp_get_free_heap_size();
+    const size_t block_now = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (heap_now < 20 * 1024 || block_now < 8 * 1024) {
+        appfw_mcp_resp_addf(resp, "内存不足(空闲 %u 字节/最大块 %u 字节),不敢启动管理页;"
+                                  "可重启设备后再试,或改用本工具配置",
+                            (unsigned)heap_now, (unsigned)block_now);
+        return 1;
+    }
+    if (!appfw_portal_start()) {
+        appfw_mcp_resp_addf(resp, "管理页启动失败,稍后再试");
+        return 1;
+    }
+    appfw_mcp_resp_addf(resp, "管理页已启动: http://%s/ (键盘设置卡片在页面下方;"
+                              "用完可 kbmic_web_stop 释放内存)", st.ip);
+    return 0;
+}
+
+static int tool_web_stop(cJSON *args, appfw_mcp_resp_t *resp)
+{
+    (void)args;
+    appfw_portal_stop();
+    appfw_mcp_resp_addf(resp, "管理页已停止,内存已释放");
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // 工具表与启动
 // ---------------------------------------------------------------------------
@@ -559,6 +600,11 @@ static const appfw_mcp_tool_t k_tools[] = {
     { "kbmic_wifi_remove_hotspot", "从已保存列表删除一个热点",
       "{\"type\":\"object\",\"properties\":{\"ssid\":{\"type\":\"string\"}},\"required\":[\"ssid\"]}",
       tool_wifi_remove },
+    { "kbmic_web_start", "启动网页管理页(浏览器打开返回的 URL,页面含键盘设置卡片)。"
+                         "用户想用网页改配置时调用;内存紧张,用完建议 kbmic_web_stop",
+      "{}", tool_web_start },
+    { "kbmic_web_stop", "停止网页管理页,释放内存",
+      "{}", tool_web_stop },
 };
 
 void kbmic_mcp_init(void)

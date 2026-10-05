@@ -62,8 +62,8 @@ CONFIG_LV_FONT_MONTSERRAT_20=y
 # #include <值>。留空会生成 #include "" 从而编译失败,所以必须显式给一个
 # 存在的头文件 —— 与 aipassport-glm 保持一致。
 CONFIG_LV_ASSERT_HANDLER_INCLUDE="assert.h"
-# LVGL 自带的 malloc 池。与系统堆不共享,配大了白占 RAM;本应用只用
-# 两页 LVGL 对象 + 一张 3500 字字体(字体在 flash 不占这里),16 KB 够用。
+# LVGL 自带的 malloc 池。实测 12 KB 会在建 UI 对象时分配失败直接崩
+# (Load access fault,2026-10-06 真机踩坑);16 KB 是本应用的下限。
 CONFIG_LV_MEM_SIZE_KILOBYTES=16
 
 # 框架 appfw_ui 的配网页用 lv_qrcode 渲染 WiFi 二维码,
@@ -75,3 +75,17 @@ CONFIG_LV_FONT_FMT_TXT_LARGE=y
 
 # --- 系统 ---
 CONFIG_FREERTOS_HZ=1000
+
+# --- 主任务栈 ---
+# app_main 里要做 NVS/显示/BLE/esp_wifi 初始化,串口日志(USB-Serial-JTAG vfs
+# 链 ~1.5KB)叠在 NVS 调用残留上,3584 直接栈保护崩溃(2026-10-06 真机踩坑,
+# Guru Meditation: Stack protection fault in task "main")。8192 是安全值。
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# --- WiFi 缓冲(BLE 共存腾 RAM) ---
+# 本应用 BLE HID + WiFi 共存且不跑音频流,收音机那套大缓冲没必要;
+# 静态 RX 10→6 直接省 6.4KB 内部 RAM,动态收发 32→12 只限突发不碍常规。
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=24
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=24
+CONFIG_ESP_WIFI_MGMT_SBUF_NUM=24

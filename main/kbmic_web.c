@@ -5,6 +5,7 @@
 // HTML 经 appfw_prov_cfg_t.app_config_html 注入阶段二管理页(在线时)。
 #include "kbmic_web.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "appfw_portal.h"
@@ -19,32 +20,62 @@ static const char *TAG = "kbmic_web";
 // ---------------------------------------------------------------------------
 // JSON 端点
 // ---------------------------------------------------------------------------
-// GET /api/kbmic → {active,count,modes:[{index,name,builtin,slots:[…]}],catalog:[…]}
+// GET /api/kbmic[?mode=N] → {active,count,selected,modes:[{index,name,builtin}],
+//                           slots:[…被选中模式的6个槽…],catalog:[…]}
+// 瘦身设计:BLE+WiFi 共存后空闲堆仅 ~26KB,全量配置的 cJSON 树会在
+// PrintUnformatted 时 OOM 返回 NULL,httpd_resp_send(USE_STRLEN) 里
+// strlen(NULL) 直接把设备送崩(2026-10-06 真机踩坑,Load access fault,
+// MTVAL=0)。所以默认只带激活模式的槽位;切模式由页面带 ?mode=N 拉取。
 static esp_err_t handler_get_config(httpd_req_t *req)
 {
     appfw_portal_touch();
-    cJSON *root = cJSON_CreateObject();
+    char q[16] = { 0 };
+    int mode = -1;
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
+        char v[6] = { 0 };
+        if (httpd_query_key_value(q, "mode", v, sizeof(v)) == ESP_OK) {
+            mode = atoi(v);
+        }
+    }
+
     const kbmic_config_t *cfg = kbmic_config_current();
+    if (mode < 0 || mode >= cfg->count) mode = cfg->active;
+
+    cJSON *root = cJSON_CreateObject();
+    if (!root) {
+        appfw_prov_send_ok(req, false);
+        return ESP_OK;
+    }
     cJSON_AddNumberToObject(root, "active", cfg->active);
     cJSON_AddNumberToObject(root, "count", cfg->count);
+    cJSON_AddNumberToObject(root, "selected", mode);
     cJSON *modes = cJSON_AddArrayToObject(root, "modes");
     for (uint8_t i = 0; i < cfg->count && i < KBMIC_MAX_PROFILES; i++) {
         cJSON *m = cJSON_CreateObject();
+        if (!m) break;
         cJSON_AddNumberToObject(m, "index", i);
         cJSON_AddStringToObject(m, "name", cfg->profiles[i].name);
         cJSON_AddNumberToObject(m, "builtin", cfg->profiles[i].builtin);
-        cJSON *slots = cJSON_AddArrayToObject(m, "slots");
-        kbmic_mcp_add_slots_json(slots, &cfg->profiles[i]);
         cJSON_AddItemToArray(modes, m);
     }
+    // 槽位只放被选中的那个模式(其余模式页面拉取时再带)
+    cJSON *slots = cJSON_AddArrayToObject(root, "slots");
+    kbmic_mcp_add_slots_json(slots, &cfg->profiles[mode]);
     cJSON *catalog = cJSON_AddArrayToObject(root, "catalog");
     for (uint8_t i = 0; i < kbmic_catalog_count(); i++) {
         cJSON *it = cJSON_CreateObject();
+        if (!it) break;
         cJSON_AddNumberToObject(it, "id", i);
         cJSON_AddStringToObject(it, "name", kbmic_catalog_get(i)->name);
         cJSON_AddItemToArray(catalog, it);
     }
-    const char *out = cJSON_PrintUnformatted(root);
+    const char *out = cJSON_PrintUnformatted(root);   // OOM 时为 NULL
+    if (!out) {
+        cJSON_Delete(root);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"ok\":false,\"error\":\"oom\"}", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, out, HTTPD_RESP_USE_STRLEN);
     cJSON_free((void *)out);
@@ -143,14 +174,14 @@ static const char k_card[] =
 "<script>"
 "var KM={sel:0,data:null};"
 "function kmMsg(t){document.getElementById('kbmic_msg').textContent=t;}"
-"function kmLoad(){fetch('/api/kbmic').then(r=>r.json()).then(d=>{KM.data=d;"
-"KM.sel=Math.min(d.active,d.count-1);kmRender();});}"
+"function kmLoad(u){fetch(u||'/api/kbmic').then(r=>r.json()).then(d=>{KM.data=d;"
+"KM.sel=d.selected;kmRender();});}"
 "function kmRender(){var d=KM.data,s='';"
-"s+='<label>模式 </label><select onchange=\"KM.sel=+this.value;kmRender()\">';"
+"s+='<label>模式 </label><select onchange=\"kmLoad(\\'/api/kbmic?mode=\\'+this.value)\">';"
 "for(var i=0;i<d.count;i++)s+='<option value=\"'+i+'\"'+(i==KM.sel?' selected':'')+'>'+i+':'+d.modes[i].name+(i==d.active?' (使用中)':'')+'</option>';"
 "s+='</select> <button onclick=\"kmAct()\">启用此模式</button>';"
 "document.getElementById('kbmic_modes').innerHTML=s;"
-"var m=d.modes[KM.sel],h='<table border=0 style=\"margin-top:6px\">';"
+"var m={slots:d.slots},h='<table border=0 style=\"margin-top:6px\">';"
 "for(var j=0;j<m.slots.length;j++){var sl=m.slots[j];"
 "h+='<tr><td style=\"padding:2px 8px 2px 0\">'+sl.button+'/'+(sl.slot_index?'长按':'短按')+'</td>'"
 "+'<td style=\"padding:2px 8px\">'+sl.action.display+'</td>'"
@@ -161,11 +192,11 @@ static const char k_card[] =
 "h+='</table>';document.getElementById('kbmic_slots').innerHTML=h;}"
 "function kmAct(){fetch('/api/kbmic/activate',{method:'POST',headers:{'Content-Type':'application/json'},"
 "body:JSON.stringify({index:KM.sel})}).then(()=>{kmMsg('已启用模式 '+KM.sel);kmLoad();});}"
-"function kmSet(j){var sl=KM.data.modes[KM.sel].slots[j];"
+"function kmSet(j){var sl=KM.data.slots[j];"
 "fetch('/api/kbmic/key',{method:'POST',headers:{'Content-Type':'application/json'},"
 "body:JSON.stringify({index:KM.sel,button:sl.button_index,slot:sl.slot_index,"
 "preset:+document.getElementById('km_p'+j).value})}).then(r=>r.json())"
-".then(o=>{kmMsg(o.ok?'已写入':'写入失败');kmLoad();});}"
+".then(o=>{kmMsg(o.ok?'已写入':'写入失败');kmLoad('/api/kbmic?mode='+KM.sel);});}"
 "kmLoad();"
 "</script>";
 
