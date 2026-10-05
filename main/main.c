@@ -18,15 +18,23 @@
 #include "bsp_button.h"
 #include "bsp_display.h"
 #include "bsp_i2c.h"
+#include "appfw_mcp.h"
+#include "appfw_net.h"
+#include "appfw_netlist.h"
+#include "appfw_netlog.h"
+#include "appfw_portal.h"
+#include "appfw_storage.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "kbmic_action.h"
 #include "kbmic_ble_svc.h"
+#include "kbmic_mcp.h"
 #include "kbmic_store.h"
 #include "kbmic_hid.h"
 #include "kbmic_ui.h"
+#include "kbmic_web.h"
 #include "nvs_flash.h"
 
 static const char *TAG = "kbmic";
@@ -46,7 +54,7 @@ typedef enum {
 } view_t;
 
 // 设置菜单的条目数,要与 build_view() 里 ST_MENU 分支的顺序一致。
-#define MENU_ITEMS 3
+#define MENU_ITEMS 4
 
 static view_t s_view = ST_HOME;
 static int s_cursor[ST_ACT];                 // 每个页面各自记住光标
@@ -290,6 +298,12 @@ static void activate(void)
         }
         break;
     }
+    case 3:
+        // 开启配网:WiFi 切热点模式(断 STA),手机连上访问 192.168.4.1。
+        // 门户里点"保存并连接"后由框架自动关热点回 STA(与收音机同款模型)。
+        ESP_LOGI(TAG, "开启配网门户(菜单项)");
+        appfw_net_start_portal();
+        break;
     default:
         break;
     }
@@ -380,14 +394,22 @@ static void build_view(kbmic_ui_state_t *st)
         } else {
             set_footer(st, "长按 OK: %s", kbmic_action_name(ok_long, name, sizeof(name)));
         }
+
+        // 配网热点开着时,主页底注让出位置给配网指引(存着配置也允许手动开)。
+        appfw_net_status_t st_net;
+        appfw_net_get_status(&st_net);
+        if (st_net.portal_active) {
+            set_footer(st, "配网中:连 %s 访问 192.168.4.1", st_net.ap_ssid);
+        }
         break;
     }
 
     case ST_MENU: {
         set_title(st, "设置");
-        static const char *items[MENU_ITEMS] = {"键盘模式", "按键配置", "恢复默认"};
+        static const char *items[MENU_ITEMS] = {"键盘模式", "按键配置", "恢复默认", "开启配网"};
         for (int i = 0; i < MENU_ITEMS; i++) {
-            set_line(st, i, items[i], i == 0 ? "" : (i == 2 ? "仅内置" : ""));
+            set_line(st, i, items[i],
+                     i == 0 ? "" : (i == 2 ? "仅内置" : (i == 3 ? "连手机配" : "")));
         }
         st->line_count = MENU_ITEMS;
         set_footer(st, "OK 选中   长按 OK 返回");
@@ -505,6 +527,28 @@ static void app_task(void *arg)
 }
 
 // ---------------------------------------------------------------------------
+// MCP 模拟触发回调
+//
+// 把合成按键事件投进 s_key_queue,与真人按键走完全同一条路径(状态机、HID、
+// 界面反馈一致)。序列:PRESS → LONG/CLICK → CLICK(收尾,放掉按住的 TAP)。
+// ---------------------------------------------------------------------------
+static void simulate_inject(int btn, bool long_press)
+{
+    if (s_key_queue == NULL || !s_keys_ready) {
+        return;
+    }
+    const int press = (btn & 0xF) | ((int)BSP_BTN_PRESS << 4);
+    const int act = (btn & 0xF) |
+                    (((int)(long_press ? BSP_BTN_LONG : BSP_BTN_CLICK)) << 4);
+    const int rel = (btn & 0xF) | ((int)BSP_BTN_CLICK << 4);
+    xQueueSend(s_key_queue, &press, 0);
+    xQueueSend(s_key_queue, &act, 0);
+    if (long_press) {
+        xQueueSend(s_key_queue, &rel, 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 启动
 // ---------------------------------------------------------------------------
 void app_main(void)
@@ -542,6 +586,24 @@ void app_main(void)
     if (kbmic_hid_init() != ESP_OK) {
         ESP_LOGE(TAG, "BLE HID 初始化失败,蓝牙键盘不可用");
     }
+
+    // 网络:WiFi 引擎 + 配网门户 + 设备 MCP(8080)。门户配置必须在
+    // appfw_net_init 之前注入 —— 空表时 init 内部会立即自动开配网,
+    // 晚了门户就用默认形状起来了(只有首次配网才自动开,之后走菜单项)。
+    static const appfw_prov_cfg_t pcfg = {
+        .app_config_html = kbmic_web_html,
+        .on_httpd_ready  = kbmic_web_register,
+    };
+    appfw_prov_configure(&pcfg);
+    appfw_netlist_t list;
+    if (!appfw_store_netlist_load(&list)) appfw_netlist_reset(&list);
+    const int net_err = appfw_net_init(&list, true);
+    if (net_err != 0) {
+        ESP_LOGW(TAG, "WiFi 初始化返回 %d", net_err);
+    }
+    appfw_netlog_init();          // 网络日志环形缓冲 + get_recent_logs 等诊断工具
+    kbmic_mcp_set_simulate(simulate_inject);
+    kbmic_mcp_init();
 
     kbmic_ui_init();   // 内部自行加解锁,调用方不要再套一层
 
