@@ -86,7 +86,42 @@ ESP32-C3 只有 Bluetooth LE,没有经典蓝牙(BR/EDR),HFP 免提协议这条�
 
 ## 用 MCP 配置(推荐)
 
-设备暴露一个自定义 GATT 配置服务,Mac 上跑一个 MCP 服务端就能读写,不用在机身上点。
+设备有**两条 MCP 通道**,工具语义一致:
+
+1. **设备侧(推荐,联网后)** —— 固件内置 MCP 常驻服务,局域网直连,无需任何
+   宿主侧桥接。设备先配网(设置菜单 → 开启配网,手机连热点访问 192.168.4.1;
+   或已联网时 AI 调 `kbmic_web_start` 起管理页),然后:
+
+   ```
+   POST http://<设备IP>:8080/mcp      # 标准 JSON-RPC,单端点
+   ```
+
+   15 个工具:配置读写(`kbmic_get_config` / `kbmic_set_key` 支持 preset 或
+   自定义 steps:修饰键可用 "Ctrl+Shift" 字符串)、模式管理(增删改/激活/恢复
+   出厂)、`kbmic_simulate_key`(模拟触发物理键,等效真人按键)、
+   `kbmic_get_state`(模式/BLE/电量/WiFi)、热点增删查、以及框架内置的
+   `wifi_status` / `get_device_info` / `get_provisioning_status` /
+   `get_recent_logs`(诊断)。
+
+2. **BLE 桥(离线可用)** —— 设备暴露自定义 GATT 配置服务,Mac 上跑
+   [mcp_server/](mcp_server/) 的 MCP 服务端经蓝牙读写,不依赖网络。
+
+### 网页设置
+
+设备联网后,AI 调 `kbmic_web_start` 会返回管理页地址,浏览器打开页面下方有
+「键盘设置」卡片:切换生效模式、六个槽(3 键 × 短按/长按)从内置动作目录
+下拉选择写入。BLE+WiFi 共存下内存紧张,管理页按需起停(`kbmic_web_stop`
+释放);不稳定就重启设备再来。完整热点配网走机身:设置菜单 → 开启配网。
+
+### 配网流程
+
+1. 机身:长按 OK 进设置 → 选「开启配网」→ 设备切热点模式(断 WiFi);
+2. 手机连接设备热点,访问 `http://192.168.4.1`,选路由器热点、填密码、保存并连接;
+3. 设备自动回连并关闭热点,屏幕底注/`get_provisioning_status` 可查 IP。
+
+首次烧录后无热点配置时,设备会自动开启一次配网热点(之后全手动)。
+
+### BLE 桥的工具一览
 
 ```
 kbmic_list_devices()                       # 找到设备
@@ -99,7 +134,7 @@ kbmic_set_active_mode(index=4)
 kbmic_delete_mode(index=0)                 # 会被拒绝:内置模式
 ```
 
-一共 12 个工具(列模式、加删模式、改键、恢复出厂、订阅事件……),完整清单与注册方法见 [mcp_server/README.zh_CN.md](mcp_server/README.zh_CN.md)。
+12 个工具(列模式、加删模式、改键、恢复出厂、订阅事件……),完整清单与注册方法见 [mcp_server/README.zh_CN.md](mcp_server/README.zh_CN.md)。
 
 <details>
 <summary>自己装一个</summary>
