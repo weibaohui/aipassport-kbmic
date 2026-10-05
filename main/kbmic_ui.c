@@ -1,4 +1,9 @@
 // main/kbmic_ui.c —— 界面渲染。见 kbmic_ui.h 的职责划分说明。
+//
+// 布局模式与框架 appfw_ui(收音机/GLM 同款,真机验证过)保持一致:
+// 自建 screen + lv_screen_load,底色直接铺在 screen 上;子控件用
+// lv_obj_set_pos 定位。不要改回"默认屏 + style x/y"的写法 —— 真机上
+// 出现过整屏只刷左上角、其余全白的问题(2026-10-05)。
 #include "kbmic_ui.h"
 
 #include <stdio.h>
@@ -29,7 +34,7 @@ static const char *TAG = "kbmic_ui";
 #define UI_CARD_HI lv_color_hex(0x2A333D)
 #define UI_WARN lv_color_hex(0xE6A23C)
 
-static lv_obj_t *s_root;
+static lv_obj_t *s_scr;
 static lv_obj_t *s_title;
 static lv_obj_t *s_dot;
 static lv_obj_t *s_status;
@@ -65,8 +70,7 @@ static lv_obj_t *mk_label(lv_obj_t *parent, lv_coord_t x, lv_coord_t y)
 {
     lv_obj_t *l = lv_label_create(parent);
     style_text(l, UI_FG);
-    lv_obj_set_style_x(l, x, LV_PART_MAIN);
-    lv_obj_set_style_y(l, y, LV_PART_MAIN);
+    lv_obj_set_pos(l, x, y);
     return l;
 }
 
@@ -91,22 +95,24 @@ esp_err_t kbmic_ui_init(void)
         return ESP_ERR_TIMEOUT;
     }
 
-    s_root = lv_obj_create(lv_screen_active());
-    style_box(s_root, UI_BG, 0);
-    lv_obj_set_scrollbar_mode(s_root, LV_SCROLLBAR_MODE_OFF);
+    // 自建 screen 并加载:底色铺满整个屏幕,不经过中间容器。
+    s_scr = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(s_scr, UI_BG, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_scr, LV_OPA_COVER, LV_PART_MAIN);
+    lv_screen_load(s_scr);
 
-    s_title = mk_label(s_root, UI_PAD_X, UI_TITLE_Y);
+    s_title = mk_label(s_scr, UI_PAD_X, UI_TITLE_Y);
 
-    s_dot = lv_obj_create(s_root);
+    s_dot = lv_obj_create(s_scr);
     lv_obj_set_size(s_dot, 12, 12);
-    style_box(s_dot, UI_DIM, LV_RADIUS_CIRCLE);
     lv_obj_set_pos(s_dot, 196, UI_TITLE_Y + 4);
+    style_box(s_dot, UI_DIM, LV_RADIUS_CIRCLE);
 
-    s_status = mk_label(s_root, 144, UI_TITLE_Y + 2);
+    s_status = mk_label(s_scr, 144, UI_TITLE_Y + 2);
     style_text(s_status, UI_DIM);
 
     // 语音面板:主页上的大圆角块。按住 OK 时整块变绿。
-    s_hero = lv_obj_create(s_root);
+    s_hero = lv_obj_create(s_scr);
     lv_obj_set_size(s_hero, 216, UI_HERO_H);
     lv_obj_set_pos(s_hero, UI_PAD_X, UI_HERO_Y);
     style_box(s_hero, UI_CARD, 14);
@@ -115,16 +121,16 @@ esp_err_t kbmic_ui_init(void)
     style_text(s_hero_text, UI_DIM);
     lv_obj_center(s_hero_text);
 
-    s_mode = mk_label(s_root, UI_PAD_X, UI_MODE_Y);
-    s_batt = mk_label(s_root, 150, UI_MODE_Y);
+    s_mode = mk_label(s_scr, UI_PAD_X, UI_MODE_Y);
+    s_batt = mk_label(s_scr, 150, UI_MODE_Y);
 
     for (int i = 0; i < KBMIC_UI_LINES_MAX; i++) {
-        s_rows[i][0] = mk_label(s_root, UI_PAD_X, UI_LIST_Y + i * UI_LINE_H);
-        s_rows[i][1] = mk_label(s_root, 108, UI_LIST_Y + i * UI_LINE_H);
+        s_rows[i][0] = mk_label(s_scr, UI_PAD_X, UI_LIST_Y + i * UI_LINE_H);
+        s_rows[i][1] = mk_label(s_scr, 108, UI_LIST_Y + i * UI_LINE_H);
         style_text(s_rows[i][0], UI_DIM);
     }
 
-    s_footer = mk_label(s_root, UI_PAD_X, UI_FOOTER_Y);
+    s_footer = mk_label(s_scr, UI_PAD_X, UI_FOOTER_Y);
     style_text(s_footer, UI_DIM);
 
     bsp_lvgl_unlock();
@@ -137,7 +143,7 @@ esp_err_t kbmic_ui_init(void)
 
 void kbmic_ui_render(const kbmic_ui_state_t *st)
 {
-    if (s_root == NULL || st == NULL) {
+    if (s_scr == NULL || st == NULL) {
         return;
     }
 
@@ -223,8 +229,8 @@ void kbmic_ui_render(const kbmic_ui_state_t *st)
         }
 
         const int slot = i - first;
-        lv_obj_set_style_y(s_rows[i][0], UI_LIST_Y + slot * UI_LINE_H, LV_PART_MAIN);
-        lv_obj_set_style_y(s_rows[i][1], UI_LIST_Y + slot * UI_LINE_H, LV_PART_MAIN);
+        lv_obj_set_pos(s_rows[i][0], UI_PAD_X, UI_LIST_Y + slot * UI_LINE_H);
+        lv_obj_set_pos(s_rows[i][1], 108, UI_LIST_Y + slot * UI_LINE_H);
 
         char label[KBMIC_UI_LABEL_MAX + 4];
         if (st->show_cursor && i == st->cursor) {
