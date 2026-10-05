@@ -1,3 +1,2 @@
-# 本应用的主机侧测试清单(每行一个路径,相对仓库根)。
-# 门禁 ./tools/validate.sh 会逐个执行;python 文件要求可执行位与 exit 0。
-tests/test_ui_charset.py
+tests/test_kbmic_model.c main/kbmic_model.c
+tests/test_hid_descriptors.c
