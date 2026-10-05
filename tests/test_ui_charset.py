@@ -1,64 +1,51 @@
 #!/usr/bin/env python3
-"""字形覆盖门禁:main/kbmic_ui.c 字符串字面量里的每个非 ASCII 字符都必须
-在 assets/fonts/kbmic_charset.txt 中(该文件就是 lv_font_conv 的 --symbols 输入)。
+"""中文字形覆盖门禁:上屏文案 ⊆ 框架字库。
 
-UTF-8 正确、编译成功,都不代表屏幕能显示 —— 字形不在字体子集里时 LVGL 会画
-占位方块。本测试把"界面文案 ⊆ 字体子集"变成硬契约:改了文案没重新生成字体,
-门禁立刻失败。
-
-注意这里检查的是**所有非 ASCII 字符**,不是只查 CJK。全角冒号、界面自用的
-▸ 光标符号同样会缺字形,漏掉它们的后果和漏汉字一模一样。
-
-符号表本身用 tools/gen_font_charset.py 从 assets/fonts/common_3500.txt 加上
-固定的全角标点生成,两边共用同一份来源,不会出现"测试查的和生成的不是同一批"。
+字库在框架 components/framework/appfw/fonts/(GB2312 一级 3755 字全量 +
+常用字表 + 应用生僻字,4827 字符)。改了上屏文案而字库缺字,真机就是方框;
+本测试让这种改动在门禁期失败,而不是在用户眼前失败。
 """
 
 from __future__ import annotations
 
-import pathlib
 import re
 import sys
+from pathlib import Path
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
-CHARSET = ROOT / "assets" / "fonts" / "kbmic_charset.txt"
-RENDERED = ROOT / "main" / "kbmic_ui.c"
+ROOT = Path(__file__).resolve().parents[1]
+CHARSET = ROOT / "components" / "framework" / "appfw" / "fonts" / "appfw_common_charset.txt"
 
-# 界面文案里允许出现的非 ASCII 字符白名单(用于给出更好的错误提示)。
-HINT = "非 ASCII 字符"
-
-
-def strip_comments(text: str) -> str:
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-    return re.sub(r"//[^\n]*", "", text)
+# 会把文本送进 LVGL 渲染的源码:界面构造 + 状态机(动态标题/底注/模式名)。
+SOURCES = [
+    ROOT / "main" / "kbmic_ui.c",
+    ROOT / "main" / "main.c",
+    ROOT / "main" / "kbmic_model.c",
+]
 
 
 def main() -> int:
     if not CHARSET.is_file():
-        print(f"FAIL: 缺少字符清单 {CHARSET.relative_to(ROOT)}", file=sys.stderr)
+        print(f"缺少框架字符清单 {CHARSET}(先更新 components/framework 子模块)")
         return 1
-    if not RENDERED.is_file():
-        print(f"FAIL: 缺少 {RENDERED.relative_to(ROOT)}", file=sys.stderr)
-        return 1
+    charset = set(CHARSET.read_text(encoding="utf-8").strip())
 
-    covered = set(CHARSET.read_text(encoding="utf-8"))
-    text = strip_comments(RENDERED.read_text(encoding="utf-8"))
+    used: set[str] = set()
+    for path in SOURCES:
+        text = path.read_text(encoding="utf-8")
+        text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+        text = re.sub(r"//[^\n]*", "", text)
+        for lit in re.findall(r'"((?:[^"\\]|\\.)*)"', text):
+            used |= {c for c in lit if ord(c) > 0x7F}
 
-    missing: list[str] = []
-    for lit in re.findall(r'"((?:[^"\\]|\\.)*)"', text):
-        for ch in lit:
-            if ord(ch) > 0x7F and ch not in covered and ch not in missing:
-                missing.append(ch)
-
+    missing = sorted(used - charset)
     if missing:
-        print(
-            f"FAIL: 以下{HINT}不在 {CHARSET.relative_to(ROOT)} 中,屏幕会显示方块:",
-            file=sys.stderr,
-        )
-        print("  " + " ".join(f"{c}(U+{ord(c):04X})" for c in missing), file=sys.stderr)
-        print("修复: python3 tools/gen_font_charset.py && 重新执行 lv_font_conv", file=sys.stderr)
+        print("字形覆盖检查失败,以下字符不在框架字库中(真机会显示为方框):")
+        for ch in missing:
+            print(f"  U+{ord(ch):04X} {ch!r}")
+        print("补入 appfw_common_charset.txt 并重跑 appfw/fonts/gen_fonts.py,"
+              "或改用字库内字符。")
         return 1
-
-    print(f"OK: 界面文案字形全部落在字体子集内(符号表 {len(covered)} 个码位)")
+    print(f"字形覆盖检查通过:{len(used)} 个非 ASCII 字符全部在框架字库中")
     return 0
 
 

@@ -205,7 +205,9 @@ def _default_builtin_profiles() -> list[Profile]:
         prof.set_slot(P.BTN_DOWN, P.SLOT_TAP, action_click(step_key(KEY_BACKSPACE)))
         prof.set_slot(P.BTN_DOWN, P.SLOT_LONG, action_settings())
         prof.set_slot(P.BTN_OK, P.SLOT_TAP, ok_tap)
-        prof.set_slot(P.BTN_OK, P.SLOT_LONG, action_settings())
+        # OK 长按留空:说话=按住 OK(按多久说多久),长按阈值必然落在说话途中,
+        # 长按槽再配设置会把说话切断。进设置默认在 长按下键(上行)。
+        prof.set_slot(P.BTN_OK, P.SLOT_LONG, action_none())
         return prof
 
     mac = fill(Profile(name="Mac", builtin=1, slots=blank()),

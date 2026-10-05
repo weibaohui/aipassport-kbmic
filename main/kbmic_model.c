@@ -74,7 +74,16 @@ static kbmic_action_t action_settings(void)
     return a;
 }
 
-// 四个内置模式的公共键位:上=回车(长按连发三次)、下=退格、OK=语音(按平台不同)。
+// OK 长按留空:说话就是"按住 OK"(TAP 触发,按多久说多久),而长按阈值 500ms
+// 会在说话途中必然触发 —— 长按槽若再配设置,说话必被切断、设置突然弹出。
+// "进设置"因此默认放在 长按下键(见上),两者不打架;用户可经 MCP/网页改回。
+static kbmic_action_t action_none(void)
+{
+    return (kbmic_action_t){0};
+}
+
+// 四个内置模式的公共键位:上=回车(长按连发三次)、下=退格(长按进设置)、
+// OK=语音(按平台不同,按住说话)。
 static void fill_common_slots(kbmic_profile_t *p, kbmic_step_t voice_step)
 {
     p->slots[KBMIC_BTN_UP][KBMIC_SLOT_TAP] =
@@ -87,7 +96,7 @@ static void fill_common_slots(kbmic_profile_t *p, kbmic_step_t voice_step)
         action_click((kbmic_step_t[]){step_key(0, KBMIC_HID_KEY_BACKSPACE)}, 1);
     p->slots[KBMIC_BTN_DOWN][KBMIC_SLOT_LONG] = action_settings();
     p->slots[KBMIC_BTN_OK][KBMIC_SLOT_TAP] = action_tap(voice_step);
-    p->slots[KBMIC_BTN_OK][KBMIC_SLOT_LONG] = action_settings();
+    p->slots[KBMIC_BTN_OK][KBMIC_SLOT_LONG] = action_none();
 }
 
 // ---------------------------------------------------------------------------

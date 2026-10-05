@@ -173,7 +173,8 @@ void kbmic_ui_render(const kbmic_ui_state_t *st)
             style_text(s_hero_text, lv_color_hex(0x06210F));
         } else {
             style_box(s_hero, UI_CARD, 14);
-            set_text(s_hero_text, st->voice_available ? "按住 说话" : "按住 无动作");
+            // 点明是哪个键:说话就是"按住 OK"(TAP 触发,按多久说多久)。
+            set_text(s_hero_text, st->voice_available ? "按住 OK 说话" : "按住 无动作");
             style_text(s_hero_text, st->voice_available ? UI_FG : UI_DIM);
         }
         s_last_voice = st->voice_active;

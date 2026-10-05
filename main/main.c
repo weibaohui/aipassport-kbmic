@@ -139,18 +139,19 @@ static void on_key_home(int btn, bsp_btn_ev_t ev)
         }
         break;
 
-    case BSP_BTN_LONG:
+    case BSP_BTN_LONG: {
         s_in_long[btn] = true;
-        if (s_held[btn]) {
-            // 短按按住的东西先放掉,再跑长按动作。
-            // 语音键就是靠这一步实现"长按取消本次"。
+        // 长按槽有效 = 配了触发,或它是"进设置"这类纯软件动作(NONE 触发,
+        // 见 kbmic_action.c;拿 NONE 当"槽没配"过滤会让长按 OK 永远进不了设置)。
+        const bool long_active = (long_slot->trigger != KBMIC_TRIG_NONE) ||
+                                 kbmic_action_is_settings(long_slot);
+        // 长按槽真要做事,才打断按住中的 TAP("长按取消本次");槽为空时
+        // 绝不能松 —— 说话就是按住 OK,在这里松了话就断了。
+        if (long_active && s_held[btn]) {
             s_held[btn] = false;
             kbmic_action_release();
         }
-        // Settings 用 trigger=NONE 表示"纯软件动作,不发 HID"(见 kbmic_action.c),
-        // 所以这里不能拿 NONE 当"槽没配"过滤掉 —— 否则默认配置的长按 OK
-        // 永远进不了设置菜单(2026-10-05 用户真机反馈"长按 OK 没反应"的根因)。
-        if (long_slot->trigger != KBMIC_TRIG_NONE || kbmic_action_is_settings(long_slot)) {
+        if (long_active) {
             if (long_slot->trigger == KBMIC_TRIG_TAP) {
                 run_slot(btn, KBMIC_SLOT_LONG);
                 s_held[btn] = true;
@@ -159,6 +160,7 @@ static void on_key_home(int btn, bsp_btn_ev_t ev)
             }
         }
         break;
+    }
 
     default:
         break;
@@ -425,7 +427,13 @@ static void build_view(kbmic_ui_state_t *st)
         // 否则用户根本不知道还能这么进设置菜单。
         const kbmic_action_t *ok_long =
             &cfg->profiles[cfg->active].slots[KBMIC_BTN_OK][KBMIC_SLOT_LONG];
-        if (kbmic_action_is_settings(ok_long)) {
+        // 底注跟着实际配置走:说话=按住OK(主页大块已示意),设置提示取
+        // 真正配了"进设置"的那个长按槽 —— 默认在下键,OK 长按留给说话。
+        const kbmic_action_t *down_long =
+            &cfg->profiles[cfg->active].slots[KBMIC_BTN_DOWN][KBMIC_SLOT_LONG];
+        if (kbmic_action_is_settings(down_long)) {
+            set_footer(st, "长按下键:设置");
+        } else if (kbmic_action_is_settings(ok_long)) {
             set_footer(st, "长按 OK 进入设置");
         } else {
             set_footer(st, "长按 OK: %s", kbmic_action_name(ok_long, name, sizeof(name)));
