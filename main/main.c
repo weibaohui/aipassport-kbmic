@@ -193,12 +193,21 @@ static void on_key_menu(int ev_btn, bsp_btn_ev_t ev)
     }
 }
 
-// 模式列表:上下移动,OK 选中并切过去,长按返回。
+// 模式列表:上下移动,OK 选中并切过去,长按返回。列表末尾还有一行动态的
+// "＋ 新建模式"(模式未满时),OK 即创建一个自定义模式并选中它 —— 不用
+// AI/网页也能扩模式。改名走网页/MCP(机身没有输入法)。
+static int modes_rows(void)
+{
+    const int n = kbmic_config_current()->count;
+    return (n < KBMIC_MAX_PROFILES) ? n + 1 : n;
+}
+
 static void on_key_modes(int btn, bsp_btn_ev_t ev)
 {
     kbmic_config_t work = *kbmic_config_current();
     const int n = work.count;
-    if (n <= 0) {
+    const int rows = modes_rows();
+    if (rows <= 0) {
         return;
     }
 
@@ -211,14 +220,29 @@ static void on_key_modes(int btn, bsp_btn_ev_t ev)
     }
 
     if (btn == KBMIC_BTN_UP) {
-        s_cursor[ST_MODES] = (s_cursor[ST_MODES] + n - 1) % n;
+        s_cursor[ST_MODES] = (s_cursor[ST_MODES] + rows - 1) % rows;
     } else if (btn == KBMIC_BTN_DOWN) {
-        s_cursor[ST_MODES] = (s_cursor[ST_MODES] + 1) % n;
+        s_cursor[ST_MODES] = (s_cursor[ST_MODES] + 1) % rows;
     } else if (btn == KBMIC_BTN_OK) {
-        work.active = (uint8_t)s_cursor[ST_MODES];
-        kbmic_config_commit(&work);
-        s_view = ST_HOME;
-        ESP_LOGI(TAG, "切换到模式 %s", work.profiles[work.active].name);
+        if (s_cursor[ST_MODES] >= n) {          // "＋ 新建模式" 行
+            char name[KBMIC_NAME_MAX];
+            snprintf(name, sizeof(name), "自定义%d",
+                     n - KBMIC_BUILTIN_MODES + 1);
+            const int idx = kbmic_config_add_profile(&work, name);
+            if (idx < 0) {
+                ESP_LOGW(TAG, "新建模式失败:已满");
+                return;
+            }
+            work.active = (uint8_t)idx;
+            kbmic_config_commit(&work);
+            s_cursor[ST_MODES] = idx;           // 停在新行上,顺手进按键配置
+            ESP_LOGI(TAG, "新建模式 %s(#%d)", name, idx);
+        } else {
+            work.active = (uint8_t)s_cursor[ST_MODES];
+            kbmic_config_commit(&work);
+            s_view = ST_HOME;
+            ESP_LOGI(TAG, "切换到模式 %s", work.profiles[work.active].name);
+        }
     }
 }
 
@@ -417,12 +441,17 @@ static void build_view(kbmic_ui_state_t *st)
     }
 
     case ST_MODES: {
-        set_title(st, "键盘模式 %d/%d", s_cursor[ST_MODES] + 1, cfg->count);
+        const int rows = modes_rows();
+        set_title(st, "键盘模式 %d/%d", s_cursor[ST_MODES] + 1, rows);
         for (uint8_t i = 0; i < cfg->count && i < KBMIC_UI_LINES_MAX; i++) {
             set_line(st, i, cfg->profiles[i].name, i == cfg->active ? "使用中" : (cfg->profiles[i].builtin ? "内置" : "自定义"));
         }
-        st->line_count = cfg->count > KBMIC_UI_LINES_MAX ? KBMIC_UI_LINES_MAX : cfg->count;
-        set_footer(st, "OK 选用   长按 OK 返回");
+        st->line_count = cfg->count;
+        if (rows > cfg->count) {              // 模式未满:末尾一行"＋ 新建模式"
+            set_line(st, cfg->count, "＋ 新建模式", "");
+            st->line_count = cfg->count + 1;
+        }
+        set_footer(st, "OK 选用/新建   长按 OK 返回");
         break;
     }
 

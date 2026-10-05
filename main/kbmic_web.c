@@ -142,12 +142,79 @@ static esp_err_t handler_activate(httpd_req_t *req)
     return ESP_OK;
 }
 
+// POST /api/kbmic/mode/add {name} — 新建自定义模式(不切换,页面手动启用)
+static esp_err_t handler_mode_add(httpd_req_t *req)
+{
+    appfw_portal_touch();
+    cJSON *root = appfw_prov_read_json(req);
+    if (!root) return ESP_FAIL;
+    const cJSON *nm = cJSON_GetObjectItemCaseSensitive(root, "name");
+    bool ok = false;
+    if (cJSON_IsString(nm) && nm->valuestring[0]) {
+        kbmic_config_t work = *kbmic_config_current();
+        const int idx = kbmic_config_add_profile(&work, nm->valuestring);
+        ok = idx >= 0 && kbmic_config_commit(&work) == ESP_OK;
+    }
+    cJSON_Delete(root);
+    appfw_prov_send_ok(req, ok);
+    return ESP_OK;
+}
+
+// POST /api/kbmic/mode/rename {index,name} — 名字只是标签,内置模式也允许改;
+// 内置模式锁的是"不可删除"。
+static esp_err_t handler_mode_rename(httpd_req_t *req)
+{
+    appfw_portal_touch();
+    cJSON *root = appfw_prov_read_json(req);
+    if (!root) return ESP_FAIL;
+    const cJSON *idx = cJSON_GetObjectItemCaseSensitive(root, "index");
+    const cJSON *nm = cJSON_GetObjectItemCaseSensitive(root, "name");
+    bool ok = false;
+    if (cJSON_IsNumber(idx) && cJSON_IsString(nm) && nm->valuestring[0]) {
+        kbmic_config_t work = *kbmic_config_current();
+        if (idx->valueint >= 0 && idx->valueint < work.count) {
+            snprintf(work.profiles[idx->valueint].name, KBMIC_NAME_MAX,
+                     "%s", nm->valuestring);
+            ok = kbmic_config_commit(&work) == ESP_OK;
+        }
+    }
+    cJSON_Delete(root);
+    appfw_prov_send_ok(req, ok);
+    return ESP_OK;
+}
+
+// POST /api/kbmic/mode/delete {index} — 仅自定义模式;删的是激活模式时
+// 把 active 夹回合法范围(与 MCP kbmic_delete_mode 同语义)。
+static esp_err_t handler_mode_delete(httpd_req_t *req)
+{
+    appfw_portal_touch();
+    cJSON *root = appfw_prov_read_json(req);
+    if (!root) return ESP_FAIL;
+    const cJSON *idx = cJSON_GetObjectItemCaseSensitive(root, "index");
+    bool ok = false;
+    if (cJSON_IsNumber(idx)) {
+        kbmic_config_t work = *kbmic_config_current();
+        if (kbmic_config_delete_profile(&work, (uint8_t)idx->valueint) == 0) {
+            if (work.active >= work.count) {
+                work.active = work.count ? (uint8_t)(work.count - 1) : 0;
+            }
+            ok = kbmic_config_commit(&work) == ESP_OK;
+        }
+    }
+    cJSON_Delete(root);
+    appfw_prov_send_ok(req, ok);
+    return ESP_OK;
+}
+
 bool kbmic_web_register(void *httpd)
 {
     static const httpd_uri_t routes[] = {
-        { .uri = "/api/kbmic",          .method = HTTP_GET,  .handler = handler_get_config },
-        { .uri = "/api/kbmic/key",      .method = HTTP_POST, .handler = handler_set_key },
-        { .uri = "/api/kbmic/activate", .method = HTTP_POST, .handler = handler_activate },
+        { .uri = "/api/kbmic",            .method = HTTP_GET,  .handler = handler_get_config },
+        { .uri = "/api/kbmic/key",        .method = HTTP_POST, .handler = handler_set_key },
+        { .uri = "/api/kbmic/activate",   .method = HTTP_POST, .handler = handler_activate },
+        { .uri = "/api/kbmic/mode/add",    .method = HTTP_POST, .handler = handler_mode_add },
+        { .uri = "/api/kbmic/mode/rename", .method = HTTP_POST, .handler = handler_mode_rename },
+        { .uri = "/api/kbmic/mode/delete", .method = HTTP_POST, .handler = handler_mode_delete },
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
         if (httpd_register_uri_handler(httpd, &routes[i]) != ESP_OK) {
@@ -179,7 +246,10 @@ static const char k_card[] =
 "function kmRender(){var d=KM.data,s='';"
 "s+='<label>模式 </label><select onchange=\"kmLoad(\\'/api/kbmic?mode=\\'+this.value)\">';"
 "for(var i=0;i<d.count;i++)s+='<option value=\"'+i+'\"'+(i==KM.sel?' selected':'')+'>'+i+':'+d.modes[i].name+(i==d.active?' (使用中)':'')+'</option>';"
-"s+='</select> <button onclick=\"kmAct()\">启用此模式</button>';"
+"s+='</select> <button onclick=\"kmAct()\">启用此模式</button> '"
+"+'<button onclick=\"kmAdd()\">新建</button>'"
+"+'<button onclick=\"kmRen()\">改名</button>'"
+"+'<button onclick=\"kmDel()\">删除</button>';"
 "document.getElementById('kbmic_modes').innerHTML=s;"
 "var m={slots:d.slots},h='<table border=0 style=\"margin-top:6px\">';"
 "for(var j=0;j<m.slots.length;j++){var sl=m.slots[j];"
@@ -190,6 +260,20 @@ static const char k_card[] =
 "h+='</select></td>'"
 "+'<td><button onclick=\"kmSet('+j+')\">写入</button></td></tr>';}"
 "h+='</table>';document.getElementById('kbmic_slots').innerHTML=h;}"
+"function kmAdd(){var n=prompt('新模式名字(≤15字节中文/字母)');if(!n)return;"
+"fetch('/api/kbmic/mode/add',{method:'POST',headers:{'Content-Type':'application/json'},"
+"body:JSON.stringify({name:n})}).then(r=>r.json())"
+".then(o=>{kmMsg(o.ok?'已新建,记得点「启用此模式」':'新建失败(已满8个?)');kmLoad();});}"
+"function kmRen(){var n=prompt('改名(≤15字节)',KM.data.modes[KM.sel].name);if(!n)return;"
+"fetch('/api/kbmic/mode/rename',{method:'POST',headers:{'Content-Type':'application/json'},"
+"body:JSON.stringify({index:KM.sel,name:n})}).then(r=>r.json())"
+".then(o=>{kmMsg(o.ok?'已改名':'改名失败');kmLoad('/api/kbmic?mode='+KM.sel);});}"
+"function kmDel(){var m=KM.data.modes[KM.sel];"
+"if(m.builtin){alert('内置模式不可删除');return;}"
+"if(!confirm('删除模式 '+m.name+' ?'))return;"
+"fetch('/api/kbmic/mode/delete',{method:'POST',headers:{'Content-Type':'application/json'},"
+"body:JSON.stringify({index:KM.sel})}).then(r=>r.json())"
+".then(o=>{kmMsg(o.ok?'已删除':'删除失败');kmLoad();});}"
 "function kmAct(){fetch('/api/kbmic/activate',{method:'POST',headers:{'Content-Type':'application/json'},"
 "body:JSON.stringify({index:KM.sel})}).then(()=>{kmMsg('已启用模式 '+KM.sel);kmLoad();});}"
 "function kmSet(j){var sl=KM.data.slots[j];"
