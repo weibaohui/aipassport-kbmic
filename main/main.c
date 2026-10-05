@@ -147,7 +147,10 @@ static void on_key_home(int btn, bsp_btn_ev_t ev)
             s_held[btn] = false;
             kbmic_action_release();
         }
-        if (long_slot->trigger != KBMIC_TRIG_NONE) {
+        // Settings 用 trigger=NONE 表示"纯软件动作,不发 HID"(见 kbmic_action.c),
+        // 所以这里不能拿 NONE 当"槽没配"过滤掉 —— 否则默认配置的长按 OK
+        // 永远进不了设置菜单(2026-10-05 用户真机反馈"长按 OK 没反应"的根因)。
+        if (long_slot->trigger != KBMIC_TRIG_NONE || kbmic_action_is_settings(long_slot)) {
             if (long_slot->trigger == KBMIC_TRIG_TAP) {
                 run_slot(btn, KBMIC_SLOT_LONG);
                 s_held[btn] = true;
@@ -338,6 +341,15 @@ static void handle_key(int btn, bsp_btn_ev_t ev)
     // 按键诊断:键盘应用事件频率是人手速,INFO 级不构成刷屏。
     // 真机排障(如"长按无反应")时先看这条有没有出,再谈状态机。
     ESP_LOGI(TAG, "按键 %s 事件%d @视图%d", btn_name(btn), (int)ev, (int)s_view);
+
+    // 长按(进菜单/返回/触发动作)之后的松手 CLICK,对新视图是"误触":
+    // 不吞掉的话,长按 OK 进菜单的瞬间会被松手直接"确认"成第一项
+    // (2026-10-06 真机踩坑)。HOME 自己用 s_in_long 区分归属,不在这处理。
+    if (ev == BSP_BTN_CLICK && s_view != ST_HOME && s_in_long[btn]) {
+        s_in_long[btn] = false;
+        return;
+    }
+
     switch (s_view) {
     case ST_HOME: on_key_home(btn, ev); break;
     case ST_MENU: on_key_menu(btn, ev); break;
