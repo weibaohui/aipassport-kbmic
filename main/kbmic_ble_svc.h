@@ -45,9 +45,10 @@
 // 按注册顺序排队才不会互相踩。
 esp_err_t kbmic_ble_svc_init(void);
 
-// 注册全局 GATT 回调。**必须**先于任何 esp_ble_gatts_app_register 调用,
-// 包括 esp_hidd_dev_init 内部的那几次。
-void kbmic_ble_svc_install_dispatch(void);
+// 注册全局 GATT 回调。时机约束:**Bluedroid enable 之后**、任何
+// esp_ble_gatts_app_register 之前(包括 esp_hidd_dev_init 内部的那几次)。
+// 放在 Bluedroid 初始化前会静默失败,GATTS 事件从此无人接收。
+esp_err_t kbmic_ble_svc_install_dispatch(void);
 
 // 通知所有已连接的订阅者。没订阅者时静默返回,不报错 —— 没人在听是常态。
 void kbmic_ble_svc_notify(uint8_t type, uint8_t active, uint8_t aux, const char *name);

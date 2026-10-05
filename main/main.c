@@ -297,6 +297,9 @@ static void activate(void)
 
 static void handle_key(int btn, bsp_btn_ev_t ev)
 {
+    // 按键诊断:键盘应用事件频率是人手速,INFO 级不构成刷屏。
+    // 真机排障(如"长按无反应")时先看这条有没有出,再谈状态机。
+    ESP_LOGI(TAG, "按键 %s 事件%d @视图%d", btn_name(btn), (int)ev, (int)s_view);
     switch (s_view) {
     case ST_HOME: on_key_home(btn, ev); break;
     case ST_MENU: on_key_menu(btn, ev); break;
@@ -529,16 +532,15 @@ void app_main(void)
     const kbmic_config_t *cfg = kbmic_config_current();
     ESP_LOGI(TAG, "当前模式 %s,共 %u 个", cfg->profiles[cfg->active].name, cfg->count);
 
-    // GATT 回调必须先装,再注册任何 GATT app —— esp_hidd_dev_init 内部也会注册。
-    kbmic_ble_svc_install_dispatch();
+    // GATTS 全局分发回调的注册在 kbmic_hid_init() 里完成(必须在 Bluedroid
+    // enable 之后、esp_hidd_dev_init 的 app 注册之前,见 kbmic_hid.c)。
 
     // BLE 失败不 return:屏幕仍要起来,用户才知道出了什么事,也能在有屏的情况下
     // 用界面改配置,而不是对着黑屏。
+    // 配置服务(kbmic_ble_svc_init)在 ESP_HIDD_START_EVENT 里才注册:
+    // 必须等 esp_hid 内部的建表链走完,否则并发建表 GATT 返回 133(见 kbmic_hid.c)。
     if (kbmic_hid_init() != ESP_OK) {
         ESP_LOGE(TAG, "BLE HID 初始化失败,蓝牙键盘不可用");
-    }
-    if (kbmic_ble_svc_init() != ESP_OK) {
-        ESP_LOGE(TAG, "配置服务初始化失败,MCP 将无法连接");
     }
 
     kbmic_ui_init();   // 内部自行加解锁,调用方不要再套一层

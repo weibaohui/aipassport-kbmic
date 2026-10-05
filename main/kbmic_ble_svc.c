@@ -41,6 +41,11 @@ static const char *TAG = "kbmic_svc";
     { .len = ESP_UUID_LEN_128, .uuid.uuid128 = UUID128_LO(a) }
 
 static esp_bt_uuid_t s_uuid_svc = UUID128_INIT(0x30);
+// 主服务声明行的 uuid_p 必须是 0x2800:IDF 5.5 的建表循环只识别 16 位
+// UUID 行,服务的真实 UUID 从该行的 value/length 里取(2026-10-05 真机
+// 踩坑:服务行写成 128 位被 continue 跳过,服务永不创建,建表报 133)。
+static uint16_t s_uuid_svc_decl = ESP_GATT_UUID_PRI_SERVICE;
+static uint8_t s_evt_val[KBMIC_EV_MAX];   // 事件特征初值(AUTO_RSP 需要真实缓冲)
 static esp_bt_uuid_t s_uuid_evt = UUID128_INIT(0x4f);
 static esp_bt_uuid_t s_uuid_char_decl = {.len = ESP_UUID_LEN_16,
                                         .uuid.uuid16 = ESP_GATT_UUID_CHAR_DECLARE};
@@ -63,7 +68,7 @@ static esp_gatt_if_t s_gatts_if;
 static bool s_registered;
 static bool s_connected;
 static uint16_t s_conn_id;
-static uint8_t s_evt_ccc;    // 事件特征的 CCC 值,非 0 表示已订阅
+static uint16_t s_evt_ccc;   // 事件特征的 CCC 值,非 0 表示已订阅(属性值 2 字节)
 
 // 属性表由 esp_ble_gatts_create_attr_tab 异步建表,句柄在那之后才拿得到。
 static uint16_t s_handle[IDX_NB];
@@ -113,14 +118,14 @@ static void build_attr_table(void)
 
     uint8_t n = 0;
 
-    // 服务本身
+    // 服务本身:声明行(0x2800)+ 服务 UUID 放 value
     s_attr[n].attr_control.auto_rsp = ESP_GATT_AUTO_RSP;
-    s_attr[n].att_desc.uuid_length = ESP_UUID_LEN_128;
-    s_attr[n].att_desc.uuid_p = (uint8_t *)&s_uuid_svc;
+    s_attr[n].att_desc.uuid_length = ESP_UUID_LEN_16;
+    s_attr[n].att_desc.uuid_p = (uint8_t *)&s_uuid_svc_decl;
     s_attr[n].att_desc.perm = ESP_GATT_PERM_READ;
     s_attr[n].att_desc.max_length = ESP_UUID_LEN_128;
     s_attr[n].att_desc.length = ESP_UUID_LEN_128;
-    s_attr[n].att_desc.value = (uint8_t *)&s_uuid_svc;
+    s_attr[n].att_desc.value = s_uuid_svc.uuid.uuid128;
     n++;
 
     for (uint8_t i = 0; i < KBMIC_SVC_CHUNKS; i++) {
@@ -128,7 +133,7 @@ static void build_attr_table(void)
 
         s_attr[n].attr_control.auto_rsp = ESP_GATT_AUTO_RSP;
         s_attr[n].att_desc.uuid_length = ESP_UUID_LEN_16;
-        s_attr[n].att_desc.uuid_p = (uint8_t *)&s_uuid_char_decl;
+        s_attr[n].att_desc.uuid_p = (uint8_t *)&s_uuid_char_decl.uuid.uuid16;
         s_attr[n].att_desc.perm = ESP_GATT_PERM_READ;
         s_attr[n].att_desc.max_length = 1;
         s_attr[n].att_desc.length = 1;
@@ -137,7 +142,7 @@ static void build_attr_table(void)
 
         s_attr[n].attr_control.auto_rsp = ESP_GATT_AUTO_RSP;
         s_attr[n].att_desc.uuid_length = ESP_UUID_LEN_128;
-        s_attr[n].att_desc.uuid_p = (uint8_t *)&s_chunk_uuid[i];
+        s_attr[n].att_desc.uuid_p = s_chunk_uuid[i].uuid.uuid128;
         s_attr[n].att_desc.perm = ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE;
         s_attr[n].att_desc.max_length = KBMIC_SVC_CHUNK_SIZE;
         s_attr[n].att_desc.length = s_chunk_len[i];
@@ -147,7 +152,7 @@ static void build_attr_table(void)
 
     s_attr[n].attr_control.auto_rsp = ESP_GATT_AUTO_RSP;
     s_attr[n].att_desc.uuid_length = ESP_UUID_LEN_16;
-    s_attr[n].att_desc.uuid_p = (uint8_t *)&s_uuid_char_decl;
+    s_attr[n].att_desc.uuid_p = (uint8_t *)&s_uuid_char_decl.uuid.uuid16;
     s_attr[n].att_desc.perm = ESP_GATT_PERM_READ;
     s_attr[n].att_desc.max_length = 1;
     s_attr[n].att_desc.length = 1;
@@ -156,16 +161,16 @@ static void build_attr_table(void)
 
     s_attr[n].attr_control.auto_rsp = ESP_GATT_AUTO_RSP;
     s_attr[n].att_desc.uuid_length = ESP_UUID_LEN_128;
-    s_attr[n].att_desc.uuid_p = (uint8_t *)&s_uuid_evt;
+    s_attr[n].att_desc.uuid_p = s_uuid_evt.uuid.uuid128;
     s_attr[n].att_desc.perm = ESP_GATT_PERM_READ;
     s_attr[n].att_desc.max_length = KBMIC_EV_MAX;
     s_attr[n].att_desc.length = 0;
-    s_attr[n].att_desc.value = NULL;
+    s_attr[n].att_desc.value = s_evt_val;
     n++;
 
     s_attr[n].attr_control.auto_rsp = ESP_GATT_AUTO_RSP;
     s_attr[n].att_desc.uuid_length = ESP_UUID_LEN_16;
-    s_attr[n].att_desc.uuid_p = (uint8_t *)&s_uuid_ccc;
+    s_attr[n].att_desc.uuid_p = (uint8_t *)&s_uuid_ccc.uuid.uuid16;
     s_attr[n].att_desc.perm = ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE;
     s_attr[n].att_desc.max_length = 2;
     s_attr[n].att_desc.length = 2;
@@ -302,6 +307,18 @@ static void dispatch(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
     // 自己的 app 自己处理,**不**再转给框架:框架只认它自己注册的那几个 gatts_if,
     // 转过去只会在它的日志里刷 "Unknown gatts_if"。反过来框架的事件也不能被
     // 我们吃掉 —— HID 报告特征就是靠它完成的。
+    //
+    // REG 事件要按 app_id 分流:自己的 gatts_if 是在这条事件里才发下来的,
+    // 用 gatts_if 判断永远接不到自己的 REG(鸡生蛋),服务就永远注册不上
+    // (2026-10-05 真机踩坑,日志表现为 BLE_HIDD "Unknown Application, 0x2040")。
+    if (event == ESP_GATTS_REG_EVT) {
+        if (param->reg.app_id == KBMIC_SVC_APP_ID) {
+            svc_event(event, gatts_if, param);
+        } else {
+            esp_hidd_gatts_event_handler(event, gatts_if, param);
+        }
+        return;
+    }
     if (s_registered && gatts_if == s_gatts_if) {
         svc_event(event, gatts_if, param);
         return;
@@ -309,9 +326,17 @@ static void dispatch(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
     esp_hidd_gatts_event_handler(event, gatts_if, param);
 }
 
-void kbmic_ble_svc_install_dispatch(void)
+esp_err_t kbmic_ble_svc_install_dispatch(void)
 {
-    esp_ble_gatts_register_callback(dispatch);
+    // 时机约束:必须在 Bluedroid enable 之后、任何 GATTS app 注册之前调用。
+    // 放早了(Bluedroid 还没起)esp_ble_gatts_register_callback 会静默失败,
+    // 之后所有 GATTS 事件(包括 esp_hid 的 REG/建表事件)无人接收,
+    // HID 服务永远建不起来,设备也就永远不会开始广播(2026-10-05 真机踩坑)。
+    esp_err_t ret = esp_ble_gatts_register_callback(dispatch);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "GATTS 分发回调注册失败: %s", esp_err_to_name(ret));
+    }
+    return ret;
 }
 
 // ---------------------------------------------------------------------------

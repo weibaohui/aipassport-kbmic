@@ -36,17 +36,29 @@
 #define KBMIC_BLE_MANUFACTURER "FoloToy"
 #define KBMIC_BLE_SERIAL "AIKB0001"
 
-// 设备名 "AI小键盘" 的 UTF-8 是 11 字节,加上 flags + appearance + 128 位
-// HID 服务 UUID 会超过 31 字节的广播包。所以广播包只放 16 位 HID 服务 UUID,
-// 名字走 scan response(下面的 scan_rsp)。
-#define KBMIC_HID_SERVICE_UUID16 0x1812
+// 设备名 "AI小键盘" 的 UTF-8 是 11 字节,加上 flags + appearance 会超过
+// 31 字节的广播包。所以广播包只放 16 位 HID 服务 UUID(0x1812),名字走
+// scan response。
 //
-// p_service_uuid 要的是 16 位 UUID 的小端字节数组,不是整数。写成 #define 整数
-// 会同时踩两个坑:对 #define 取地址编译不过,sizeof(#define) 还会算成 sizeof(int)=4,
-// 多报两个字节的垃圾。用下面的 static const 数组一次解决。
-static const uint8_t s_hid_service_uuid16[] = {
-    KBMIC_HID_SERVICE_UUID16 & 0xFF,         // 0x12
-    (KBMIC_HID_SERVICE_UUID16 >> 8) & 0xFF,  // 0x18
+// ⚠️ esp_ble_gap_config_adv_data 的 service_uuid 字段有两个反直觉的约定:
+//   1. p_service_uuid 是**每 16 字节一格**的数组,步长固定 LEN_UUID_128,
+//      不是紧凑的 2 字节数组。下游用 btc128_to_bta_uuid() 逐格解析,
+//      service_uuid_len 必须是 16 的倍数。
+//   2. 16 位与否由 uuidType() 判定:非 [12][13] 的 12 个字节必须与标准
+//      BASE_UUID 完全一致才判成 16 位(此时 uuid16 = [13]<<8|[12])。
+//      把值放在 [0][1] 会被判成 128 位自定义 UUID → 18 字节 AD 字段,
+//      广播包超 31 字节,BTM 只写入部分数据且广播出去的是错误 UUID
+//      (2026-10-05 真机踩坑,日志表现为 "Partial data write into ADV")。
+// 所以下面是 0x1812 的规范小端 128 位布局:BASE_UUID 前 12 字节 +
+// 0x12、0x18 放在 [12][13],末尾两字节补零。
+#define KBMIC_HID_SERVICE_UUID16 0x1812
+#define KBMIC_SVC_UUID_SLOT 16
+static const uint8_t s_hid_service_uuid[KBMIC_SVC_UUID_SLOT] = {
+    0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,   // BASE_UUID 前 8 字节
+    0x00, 0x10, 0x00, 0x00,                            // 后 4 字节
+    KBMIC_HID_SERVICE_UUID16 & 0xFF,         // [12] = 0x12 → uuid16 低位
+    (KBMIC_HID_SERVICE_UUID16 >> 8) & 0xFF,  // [13] = 0x18 → uuid16 高位
+    0, 0,
 };
 
 // HID 报告引脚:按下保持时长。低于 30ms 少数主机会漏掉这一击,高于 60ms
@@ -78,13 +90,11 @@ static const uint8_t s_map_keyboard[] = {
     0x75, 0x08,        //   Report Size (8)
     0x81, 0x01,        //   Input (Cnst)              -> 保留字节(必须补齐)
 
-    0x95, 0x05,        //   Report Count (5)
-    0x75, 0x01,        //   Report Size (1)
-    0x81, 0x03,        //   Input (Cnst,Var,Abs)      -> 5 bit 填充
-
-    0x95, 0x01,        //   Report Count (1)
-    0x75, 0x03,        //   Report Size (3)
-    0x81, 0x03,        //   Input (Cnst,Var,Abs)      -> 3 bit 填充
+    // 这里**不能**再插 5 bit + 3 bit 的填充项。那是鼠标描述符的尾巴,
+    // 键盘不需要:1 字节 modifier + 1 字节 reserved 已经把字节对齐了,
+    // 加上它们会让 Input 变成 9 字节。esp_hid 的描述符解析器会直接报
+    // "INPUT report does not amount to full bytes" 然后 panic —— 表现是
+    // 开机无限重启,屏幕一直闪。别照抄带填充的鼠标描述符。
 
     0x95, 0x06,        //   Report Count (6)
     0x75, 0x08,        //   Report Size (8)
@@ -99,7 +109,10 @@ static const uint8_t s_map_keyboard[] = {
     0x29, 0x05,        //   Usage Maximum (5 = Kana)
     0x75, 0x01,        //   Report Size (1)
     0x95, 0x05,        //   Report Count (5)
-    0x81, 0x02,        //   Output (Data,Var,Abs)     -> 主机发来的 LED 状态
+    0x91, 0x02,        //   Output (Data,Var,Abs)     -> 主机发来的 LED 状态
+    //                        ↑ 必须是 0x91(Output),不是 0x81(Input)。写成 0x81
+    //                          会把这 5 bit 算进 Input 报告,Input 变成 69 bit
+    //                          而非 64 bit —— 同样表现为解析失败 + panic 重启。
 
     0x75, 0x03,        //   Report Size (3)
     0x95, 0x01,        //   Report Count (1)
@@ -108,18 +121,25 @@ static const uint8_t s_map_keyboard[] = {
     0xC0               // End Collection
 };
 
-// report map 1:Consumer Control 报告。这里刻意只声明 0x0001..0x029D 这一段,
-// 并且用 16 位 Report Size 的 Array 布局(而不是官方例程那种 2 字节位域),
-// 因为 Globe 是 16 位单值 usage,Array 布局直接把 usage 原样放进报告,
-// 主机侧不需要理解任何自定义位含义。
+// report map 1:Consumer Control 报告。这里只声明 Globe 0x029D 这一个 16 位 usage。
+//
+// ⚠️ 16 位 usage 的编码陷阱:HID 的 Usage Min/Max 按 item 的低 2 位定长度
+// (0→0 字节、1→1 字节、2→2 字节、3→4 字节)。Usage Maximum 的三种编码是
+// 0x29=1 字节 / 0x2A=2 字节 / 0x2B=4 字节。写成 0x29, 0x9D, 0x02 的话,
+// 解析器只吃掉 0x9D,后面的 0x02 会被当成下一个 item 的命令码,整个描述符
+// 从此错位 —— 表现为 esp_hid 报 "INPUT report does not amount to full bytes"
+// 然后 panic,设备开机无限重启。要 16 位值就得用 0x1A / 0x2A。
+//
+// 用 16 位 Array 布局而不是官方例程那种位域:Globe 是单值 usage,Array 把 usage
+// 原样放进报告,主机侧不需要理解任何自定义位含义。
 static const uint8_t s_map_consumer[] = {
     0x05, 0x0C,        // Usage Page (Consumer)
     0x09, 0x01,        // Usage (Consumer Control)
     0xA1, 0x01,        // Collection (Application)
-    0x15, 0x00,        //   Logical Minimum (0)
-    0x26, 0x9D, 0x02,  //   Logical Maximum (0x029D)
-    0x19, 0x01,        //   Usage Minimum (1)
-    0x29, 0x9D, 0x02,  //   Usage Maximum (0x029D)
+    0x15, 0x00,        //   Logical Minimum (0)        —— 0x15 = 1 字节形式
+    0x26, 0x9D, 0x02,  //   Logical Maximum (0x029D)   —— 0x26 = 2 字节形式
+    0x1A, 0x01, 0x00,  //   Usage Minimum (0x0001)     —— 0x1A = 2 字节形式
+    0x2A, 0x9D, 0x02,  //   Usage Maximum (0x029D)     —— 0x2A = 2 字节形式
     0x75, 0x10,        //   Report Size (16)
     0x95, 0x01,        //   Report Count (1)
     0x81, 0x00,        //   Input (Data,Array)       -> 16 位 usage
@@ -197,7 +217,8 @@ static esp_err_t gap_ble_init(void)
         return ret;
     }
 
-    // 广播包:flags + appearance + 16 位 HID 服务 UUID。名字塞不下,走 scan response。
+    // 广播包:flags + appearance + txpower + 16 位 HID 服务 UUID。
+    // 名字塞不下(11 字节 UTF-8 + 其它字段会超 31),走 scan response。
     const esp_ble_adv_data_t adv_data = {
         .set_scan_rsp = false,
         .include_name = false,
@@ -205,8 +226,8 @@ static esp_err_t gap_ble_init(void)
         .min_interval = 0x0006,  // 7.5ms
         .max_interval = 0x0010,  // 20ms
         .appearance = ESP_HID_APPEARANCE_KEYBOARD,
-        .service_uuid_len = sizeof(s_hid_service_uuid16),
-        .p_service_uuid = (uint8_t *)s_hid_service_uuid16,
+        .service_uuid_len = sizeof(s_hid_service_uuid),   // 16,必须是 16 的倍数
+        .p_service_uuid = (uint8_t *)s_hid_service_uuid,
         .flag = 0x6,
     };
     if ((ret = esp_ble_gap_config_adv_data(&adv_data)) != ESP_OK) {
@@ -214,11 +235,12 @@ static esp_err_t gap_ble_init(void)
         return ret;
     }
 
+    // scan response 只放名字。appearance 已经在广播包里了,再放一遍纯属浪费
+    // 那 31 字节里最紧张的位置,留给更长的名字更划算。
     const esp_ble_adv_data_t scan_rsp = {
         .set_scan_rsp = true,
-        .include_name = true,     // "AI小键盘" 走这里
+        .include_name = true,     // 设备名("AI小键盘",11 字节 UTF-8)走这里
         .include_txpower = false,
-        .appearance = ESP_HID_APPEARANCE_KEYBOARD,
     };
     if ((ret = esp_ble_gap_config_adv_data(&scan_rsp)) != ESP_OK) {
         ESP_LOGE(TAG, "扫描响应配置失败: %s", esp_err_to_name(ret));
@@ -302,6 +324,12 @@ static void hid_event_cb(void *handler_args, esp_event_base_t base, int32_t id, 
     case ESP_HIDD_START_EVENT:
         ESP_LOGI(TAG, "HID 协议栈就绪,开始广播 \"%s\"", KBMIC_BLE_DEVICE_NAME);
         gap_adv_start();
+        // 配置服务在这里才注册:esp_hid 内部电池/设备信息/HID 三个服务的
+        // 建表链到本事件才走完,更早注册会与它并发建表,GATT 返回 133
+        // (2026-10-05 真机踩坑)。失败不阻塞:键盘照常用,只是 MCP 配不了。
+        if (kbmic_ble_svc_init() != ESP_OK) {
+            ESP_LOGE(TAG, "配置服务注册失败,MCP 将无法连接");
+        }
         break;
     case ESP_HIDD_CONNECT_EVENT:
         s_connected = true;
@@ -338,6 +366,14 @@ static void hid_event_cb(void *handler_args, esp_event_base_t base, int32_t id, 
 esp_err_t kbmic_hid_init(void)
 {
     esp_err_t ret = gap_stack_init();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    // GATTS 全局分发回调必须装在 Bluedroid enable 之后(已在 gap_stack_init
+    // 里起来)、任何 GATTS app 注册之前 —— esp_hidd_dev_init 内部马上会注册
+    // 3 个 app,晚一步 REG/建表事件就无人接收,HID 永远起不来。
+    ret = kbmic_ble_svc_install_dispatch();
     if (ret != ESP_OK) {
         return ret;
     }
