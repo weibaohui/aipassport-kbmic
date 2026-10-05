@@ -58,7 +58,20 @@ CONFIG_LV_FONT_MONTSERRAT_20=y
 # 注意这里必须用 KB 这个键:本仓解析到的是 lvgl/lvgl 9.5.0,其 Kconfig 只有
 # LV_MEM_SIZE_KILOBYTES。写成新键 CONFIG_LV_MEM_SIZE(字节)不会报错,而是
 # 静静不生效,于是回落成 Kconfig 默认的 64KB,白占 48KB RAM。
+# LVGL 9.5 的 Kconfig 会把 CONFIG_LV_ASSERT_HANDLER_INCLUDE 直接展开成
+# #include <值>。留空会生成 #include "" 从而编译失败,所以必须显式给一个
+# 存在的头文件 —— 与 aipassport-glm 保持一致。
+CONFIG_LV_ASSERT_HANDLER_INCLUDE="assert.h"
+# LVGL 自带的 malloc 池。与系统堆不共享,配大了白占 RAM;本应用只用
+# 两页 LVGL 对象 + 一张 3500 字字体(字体在 flash 不占这里),16 KB 够用。
 CONFIG_LV_MEM_SIZE_KILOBYTES=16
+
+# 框架 appfw_ui 的配网页用 lv_qrcode 渲染 WiFi 二维码,
+# 框架组件整体参与编译,不配网的应用也要开,否则编译失败。
+CONFIG_LV_USE_QRCODE=y
+# 框架全量中文字库(4333 字)24px 位图 >1MB,超过 LVGL 20 位 bitmap_index,
+# 必须用 32 位索引;见 components/framework/appfw/fonts/README。
+CONFIG_LV_FONT_FMT_TXT_LARGE=y
 
 # --- 系统 ---
 CONFIG_FREERTOS_HZ=1000
