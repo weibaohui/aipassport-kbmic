@@ -1,0 +1,64 @@
+# --- 目标芯片 ---
+CONFIG_IDF_TARGET="esp32c3"
+# 注:ESP32-C3 无 PSRAM,故不设 CONFIG_SPIRAM。
+
+# --- Flash ---
+# FoloToy AI Passport 当前产品/固件基线使用 8MB Flash。
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+# 固定 8MB 镜像头，关闭 detect，便于 idf.py merge-bin。
+CONFIG_ESPTOOLPY_HEADER_FLASHSIZE_UPDATE=n
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# --- 控制台:USB-Serial-JTAG(C3 原生 USB,GPIO18/19)---
+# 不用 UART0:其默认 TX=GPIO21 与本板背光引脚冲突。
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# --- Bluetooth:仅 BLE ---
+# ESP32-C3 只有 Bluetooth LE,没有经典蓝牙,所以这里只开 BLE 一侧。
+# 键盘身份由 esp_hid 组件的 GATT 传输层承载,不开 CONFIG_BT_HID_ENABLED /
+# CONFIG_BT_HID_DEVICE_ENABLED —— 那两个是经典蓝牙(BR/EDR)HID,C3 用不到。
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_BLE_ENABLED=y
+CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
+# C3 只有一个射频,留出共存余量;应用不开 Wi-Fi,此处按最小连接需求配。
+CONFIG_BT_NIMBLE_ENABLED=n
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_CTRL_MODE_BTDM=n
+CONFIG_BT_CTRL_MODE_BLE_ONLY=y
+# 控制器任务栈:键盘只需维持连接与指示,2KB 足够。
+CONFIG_BT_CONTROLLER_TASK_STACK_SIZE=2048
+# GATT 相关事件量很小(单 HID 服务 + 电量服务),默认档位即可。
+CONFIG_BT_GATT_MAX_SERVICES=6
+
+# --- LVGL ---
+CONFIG_LV_COLOR_DEPTH_16=y
+# 20 ms display refresh period targets up to 50 FPS when rendering and SPI
+# transfer complete within the same budget.
+CONFIG_LV_DEF_REFR_PERIOD=20
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+# 中文界面:UTF-8 编码 + 缺字占位(缺字必须可见,不得静默空白)。
+CONFIG_LV_TXT_ENC_UTF8=y
+CONFIG_LV_USE_FONT_PLACEHOLDER=y
+# 中文正文用本应用自建的 16px 子集(app_font_16,约 81KB),由
+# assets/fonts/kbmic_charset.txt 经 lv_font_conv 生成。
+#
+# 这里刻意【不】开 LVGL 自带的 LV_FONT_SOURCE_HAN_SANS_SC_*_CJK:那两套内置
+# 子集各约 1.0/1.2MB,且字形是随机选取的 1373 字 —— 实测缺 键/盘/按/说/话/
+# 换/选/车/确/语/长/设/并 这些本应用文案必用的字,开它等于白占 1MB 还显示不全。
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+# LVGL 内置 malloc 池大小(KB)。它是独立静态区、不与系统堆共享,配大了会白白占用 RAM。
+# 本应用 UI 简单(状态行 + 平台选择),16KB 足够;若出现绘制卡死/看门狗,调大此值。
+#
+# 注意这里必须用 KB 这个键:本仓解析到的是 lvgl/lvgl 9.5.0,其 Kconfig 只有
+# LV_MEM_SIZE_KILOBYTES。写成新键 CONFIG_LV_MEM_SIZE(字节)不会报错,而是
+# 静静不生效,于是回落成 Kconfig 默认的 64KB,白占 48KB RAM。
+CONFIG_LV_MEM_SIZE_KILOBYTES=16
+
+# --- 系统 ---
+CONFIG_FREERTOS_HZ=1000

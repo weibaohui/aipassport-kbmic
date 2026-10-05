@@ -1,0 +1,352 @@
+// main/kbmic_ble_svc.c —— 配置服务的 GATT 实现。见 kbmic_ble_svc.h 的分片说明。
+//
+// IDF 5.5 的属性表与 5.4 差别很大,这里踩过的坑记在下面:
+//   * esp_attr_desc_t.uuid(结构体) 变成了 uuid_length + uuid_p(指向 esp_bt_uuid_t 的指针)
+//   * 属性表里不再有 handle 字段,句柄要在 ESP_GATTS_CREAT_ATTR_TAB_EVT 里接
+//   * esp_ble_gatts_read_long_resp / esp_ble_gatts_prerelease 在 5.5 的公开 API 里没了,
+//     所以配置只能分片走普通读写
+#include "kbmic_ble_svc.h"
+
+#include "kbmic_store.h"
+
+#include <string.h>
+
+#include "esp_assert.h"
+#include "esp_gatt_defs.h"
+#include "esp_gatts_api.h"
+#include "esp_hidd_gatts.h"
+#include "esp_log.h"
+
+static const char *TAG = "kbmic_svc";
+
+// 不能与框架用的那几个 app_id 撞:
+//   ESP_GATT_UUID_DEVICE_INFO_SVC=0x1800、BATTERY=0x180F、HID_SVC=0x1812。
+#define KBMIC_SVC_APP_ID 0x2040
+
+// 128 位 UUID 在 Bluedroid 里按小端存放,字面量要整体反着写。
+// 可变的是倒数第 4 个字节(0x30=服务 / 0x40+i=第 i 个分片 / 0x4f=事件),
+// 前面 12 字节与后面 3 字节都是固定的。
+//   7d1c5a30-9f6e-4a21-8c3d-2b5e7a9f1c48  ← a=0x30
+#define UUID128_LO(a)                                                            \
+    {                                                                            \
+        0x48, 0x1c, 0x9f, 0x7a, 0x5e, 0x2b, 0x3d, 0x8c, 0x21, 0x4a, 0x6e, 0x9f,    \
+            (a), 0x5a, 0x1c, 0x7d                                                \
+    }
+
+// 分片 i 的 UUID 取 0x40 + i。客户端从 0x40 开始顺序探测,碰到缺口就停。
+#define KBMIC_CHUNK_UUID_BASE 0x40
+
+// esp_bt_uuid_t 是 {len, union{...}},不能直接拿 16 个字节的宏去初始化它。
+#define UUID128_INIT(a) \
+    { .len = ESP_UUID_LEN_128, .uuid.uuid128 = UUID128_LO(a) }
+
+static esp_bt_uuid_t s_uuid_svc = UUID128_INIT(0x30);
+static esp_bt_uuid_t s_uuid_evt = UUID128_INIT(0x4f);
+static esp_bt_uuid_t s_uuid_char_decl = {.len = ESP_UUID_LEN_16,
+                                        .uuid.uuid16 = ESP_GATT_UUID_CHAR_DECLARE};
+static esp_bt_uuid_t s_uuid_ccc = {.len = ESP_UUID_LEN_16,
+                                   .uuid.uuid16 = ESP_GATT_UUID_CHAR_CLIENT_CONFIG};
+// 分片 i 的 UUID。必须活到建表之后,所以是文件作用域的静态数组。
+static esp_bt_uuid_t s_chunk_uuid[KBMIC_SVC_CHUNKS];
+
+// 属性表布局:服务 1 项 + 每分片 2 项(声明/值) + 事件 3 项(声明/值/CCC)。
+enum {
+    IDX_SVC = 0,
+    IDX_CHUNK_BASE = 1,
+    IDX_EVT_CHAR = IDX_CHUNK_BASE + KBMIC_SVC_CHUNKS * 2,
+    IDX_EVT_VAL,
+    IDX_EVT_CCC,
+    IDX_NB,
+};
+
+static esp_gatt_if_t s_gatts_if;
+static bool s_registered;
+static bool s_connected;
+static uint16_t s_conn_id;
+static uint8_t s_evt_ccc;    // 事件特征的 CCC 值,非 0 表示已订阅
+
+// 属性表由 esp_ble_gatts_create_attr_tab 异步建表,句柄在那之后才拿得到。
+static uint16_t s_handle[IDX_NB];
+static esp_gatts_attr_db_t s_attr[IDX_NB];
+static uint8_t s_chunk_len[KBMIC_SVC_CHUNKS];
+
+// 写入暂存区。客户端把 N 个分片依次写进来,收齐且校验通过才提交。
+// 直接写生效存储的话,一次写到一半断连就会留下半份配置,而 1580 字节里任何一个
+// 字节错了都足以让设备认不出自己配过什么。
+static kbmic_config_t s_staging;
+static uint32_t s_staging_mask;
+
+static uint8_t s_char_prop_read = ESP_GATT_CHAR_PROP_BIT_READ;
+static uint8_t s_char_prop_notify = ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY;
+
+// 分片数不能超过 32:暂存位图是 uint32。
+// IDF 5.5 的 esp_assert.h 里已经没有 ESP_ASSERT 了,只有 ESP_STATIC_ASSERT。
+ESP_STATIC_ASSERT(KBMIC_SVC_CHUNKS <= 32, "分片位图是 uint32,分片数不能超过 32");
+// 属性表长度与枚举必须一致,否则事件里按 IDX_* 取句柄会取错位置。
+ESP_STATIC_ASSERT(1 + KBMIC_SVC_CHUNKS * 2 + 3 == IDX_NB, "属性表长度与 IDX_* 不一致");
+
+// 配置的正文存在 kbmic_config 里(kbmic_config_current(),地址运行期稳定)。
+// 分片特征的 att_desc.value 直接指向它的对应偏移:Bluedroid 建表时只保存指针
+// 不做深拷贝,所以配置一换,下一次读拿到的就是新值,不需要额外的读回调。
+static uint8_t *cfg_store(void)
+{
+    return (uint8_t *)kbmic_config_current();
+}
+
+static int chunk_of_handle(uint16_t handle)
+{
+    for (uint8_t i = 0; i < KBMIC_SVC_CHUNKS; i++) {
+        if (s_handle[IDX_CHUNK_BASE + 1 + i * 2] == handle) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// 组装属性表。必须在 ESP_GATTS_CREAT_ATTR_TAB_EVT 里、BLE 起来之后调用一次。
+static void build_attr_table(void)
+{
+    for (uint8_t i = 0; i < KBMIC_SVC_CHUNKS; i++) {
+        const uint16_t left = (uint16_t)(KBMIC_CONFIG_SIZE - i * KBMIC_SVC_CHUNK_SIZE);
+        s_chunk_len[i] = (uint8_t)(left < KBMIC_SVC_CHUNK_SIZE ? left : KBMIC_SVC_CHUNK_SIZE);
+    }
+
+    uint8_t n = 0;
+
+    // 服务本身
+    s_attr[n].attr_control.auto_rsp = ESP_GATT_AUTO_RSP;
+    s_attr[n].att_desc.uuid_length = ESP_UUID_LEN_128;
+    s_attr[n].att_desc.uuid_p = (uint8_t *)&s_uuid_svc;
+    s_attr[n].att_desc.perm = ESP_GATT_PERM_READ;
+    s_attr[n].att_desc.max_length = ESP_UUID_LEN_128;
+    s_attr[n].att_desc.length = ESP_UUID_LEN_128;
+    s_attr[n].att_desc.value = (uint8_t *)&s_uuid_svc;
+    n++;
+
+    for (uint8_t i = 0; i < KBMIC_SVC_CHUNKS; i++) {
+        s_chunk_uuid[i] = (esp_bt_uuid_t)UUID128_INIT((uint8_t)(KBMIC_CHUNK_UUID_BASE + i));
+
+        s_attr[n].attr_control.auto_rsp = ESP_GATT_AUTO_RSP;
+        s_attr[n].att_desc.uuid_length = ESP_UUID_LEN_16;
+        s_attr[n].att_desc.uuid_p = (uint8_t *)&s_uuid_char_decl;
+        s_attr[n].att_desc.perm = ESP_GATT_PERM_READ;
+        s_attr[n].att_desc.max_length = 1;
+        s_attr[n].att_desc.length = 1;
+        s_attr[n].att_desc.value = (uint8_t *)&s_char_prop_read;
+        n++;
+
+        s_attr[n].attr_control.auto_rsp = ESP_GATT_AUTO_RSP;
+        s_attr[n].att_desc.uuid_length = ESP_UUID_LEN_128;
+        s_attr[n].att_desc.uuid_p = (uint8_t *)&s_chunk_uuid[i];
+        s_attr[n].att_desc.perm = ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE;
+        s_attr[n].att_desc.max_length = KBMIC_SVC_CHUNK_SIZE;
+        s_attr[n].att_desc.length = s_chunk_len[i];
+        s_attr[n].att_desc.value = cfg_store() + i * KBMIC_SVC_CHUNK_SIZE;
+        n++;
+    }
+
+    s_attr[n].attr_control.auto_rsp = ESP_GATT_AUTO_RSP;
+    s_attr[n].att_desc.uuid_length = ESP_UUID_LEN_16;
+    s_attr[n].att_desc.uuid_p = (uint8_t *)&s_uuid_char_decl;
+    s_attr[n].att_desc.perm = ESP_GATT_PERM_READ;
+    s_attr[n].att_desc.max_length = 1;
+    s_attr[n].att_desc.length = 1;
+    s_attr[n].att_desc.value = (uint8_t *)&s_char_prop_notify;
+    n++;
+
+    s_attr[n].attr_control.auto_rsp = ESP_GATT_AUTO_RSP;
+    s_attr[n].att_desc.uuid_length = ESP_UUID_LEN_128;
+    s_attr[n].att_desc.uuid_p = (uint8_t *)&s_uuid_evt;
+    s_attr[n].att_desc.perm = ESP_GATT_PERM_READ;
+    s_attr[n].att_desc.max_length = KBMIC_EV_MAX;
+    s_attr[n].att_desc.length = 0;
+    s_attr[n].att_desc.value = NULL;
+    n++;
+
+    s_attr[n].attr_control.auto_rsp = ESP_GATT_AUTO_RSP;
+    s_attr[n].att_desc.uuid_length = ESP_UUID_LEN_16;
+    s_attr[n].att_desc.uuid_p = (uint8_t *)&s_uuid_ccc;
+    s_attr[n].att_desc.perm = ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE;
+    s_attr[n].att_desc.max_length = 2;
+    s_attr[n].att_desc.length = 2;
+    s_attr[n].att_desc.value = (uint8_t *)&s_evt_ccc;
+    n++;
+
+}
+
+static void commit_staging(void)
+{
+    if (!kbmic_config_valid(&s_staging)) {
+        ESP_LOGW(TAG, "收到的配置未通过校验,丢弃(已写 %u/%u 片)",
+                 (unsigned)__builtin_popcount(s_staging_mask), KBMIC_SVC_CHUNKS);
+        s_staging_mask = 0;
+        return;
+    }
+    s_staging_mask = 0;
+    kbmic_config_commit(&s_staging);
+
+    const kbmic_config_t *cur = kbmic_config_current();
+    kbmic_ble_svc_notify(KBMIC_EV_CONFIG_SAVED, cur->active, 0, cur->profiles[cur->active].name);
+}
+
+// ---------------------------------------------------------------------------
+// 服务事件
+// ---------------------------------------------------------------------------
+static void svc_event(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
+                     esp_ble_gatts_cb_param_t *param)
+{
+    switch (event) {
+    case ESP_GATTS_REG_EVT:
+        if (param->reg.status != ESP_GATT_OK) {
+            ESP_LOGE(TAG, "注册 GATT app 失败: %d", param->reg.status);
+            return;
+        }
+        s_gatts_if = gatts_if;
+        s_registered = true;
+        const esp_gatt_srvc_id_t svc = {
+            .id = {.uuid = s_uuid_svc, .inst_id = 0},
+            .is_primary = true,
+        };
+        esp_ble_gatts_create_service(gatts_if, (esp_gatt_srvc_id_t *)&svc, IDX_NB);
+        break;
+
+    case ESP_GATTS_CREATE_EVT:
+        if (param->create.status != ESP_GATT_OK) {
+            ESP_LOGE(TAG, "创建服务失败: %d", param->create.status);
+            return;
+        }
+        build_attr_table();
+        esp_ble_gatts_create_attr_tab(s_attr, gatts_if, IDX_NB, 0);
+        break;
+
+    case ESP_GATTS_CREAT_ATTR_TAB_EVT: {
+        // 句柄只在这一步才拿得到,必须整段拷出来:param->handles 是协议栈的临时
+        // 缓冲,事件返回后就没了。
+        if (param->add_attr_tab.status != ESP_GATT_OK) {
+            ESP_LOGE(TAG, "建表失败: %d", param->add_attr_tab.status);
+            return;
+        }
+        const uint16_t got = param->add_attr_tab.num_handle;
+        for (uint16_t i = 0; i < got && i < IDX_NB; i++) {
+            s_handle[i] = param->add_attr_tab.handles[i];
+        }
+        esp_ble_gatts_start_service(s_handle[IDX_SVC]);
+        break;
+    }
+
+    case ESP_GATTS_START_EVT:
+        ESP_LOGI(TAG, "配置服务就绪:%u 个分片 × %u 字节 = %u 字节",
+                 KBMIC_SVC_CHUNKS, KBMIC_SVC_CHUNK_SIZE, KBMIC_CONFIG_SIZE);
+        break;
+
+    case ESP_GATTS_CONNECT_EVT:
+        s_conn_id = param->connect.conn_id;
+        s_connected = true;
+        break;
+
+    case ESP_GATTS_DISCONNECT_EVT:
+        s_connected = false;
+        s_evt_ccc = 0;
+        s_staging_mask = 0;   // 断开后残留的半份写入没有意义,丢掉
+        break;
+
+    case ESP_GATTS_WRITE_EVT: {
+        if (param->write.handle == s_handle[IDX_EVT_CCC]) {
+            s_evt_ccc = param->write.value[0];
+            break;
+        }
+        const int chunk = chunk_of_handle(param->write.handle);
+        if (chunk < 0) {
+            break;   // 不是我们的特征
+        }
+        if (param->write.is_prep) {
+            // 分片设计就是为了绕开长写,客户端不该走到这里。
+            ESP_LOGW(TAG, "拒绝 prepare write(分片协议不支持)");
+            break;
+        }
+        if (param->write.offset != 0 || param->write.len > s_chunk_len[chunk]) {
+            ESP_LOGW(TAG, "分片 %d 写入越界 offset=%u len=%u", chunk,
+                     param->write.offset, param->write.len);
+            break;
+        }
+        memcpy(((uint8_t *)&s_staging) + chunk * KBMIC_SVC_CHUNK_SIZE, param->write.value,
+               param->write.len);
+        s_staging_mask |= (1U << chunk);
+        if (s_staging_mask == ((1U << KBMIC_SVC_CHUNKS) - 1)) {
+            commit_staging();
+        }
+        break;
+    }
+
+    case ESP_GATTS_READ_EVT:
+        // 配置分片不需要读回调:att_desc.value 已指向生效配置,Bluedroid 直接取。
+        // 事件特征没有可读内容,明确回一个空响应,免得主机一直等。
+        if (param->read.handle == s_handle[IDX_EVT_VAL] && param->read.need_rsp) {
+            esp_gatt_rsp_t rsp = {.handle = param->read.handle};
+            esp_ble_gatts_send_response(s_gatts_if, param->read.conn_id, param->read.trans_id,
+                                        ESP_GATT_OK, &rsp);
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 全局 GATT 回调转发
+// ---------------------------------------------------------------------------
+static void dispatch(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
+                     esp_ble_gatts_cb_param_t *param)
+{
+    // 自己的 app 自己处理,**不**再转给框架:框架只认它自己注册的那几个 gatts_if,
+    // 转过去只会在它的日志里刷 "Unknown gatts_if"。反过来框架的事件也不能被
+    // 我们吃掉 —— HID 报告特征就是靠它完成的。
+    if (s_registered && gatts_if == s_gatts_if) {
+        svc_event(event, gatts_if, param);
+        return;
+    }
+    esp_hidd_gatts_event_handler(event, gatts_if, param);
+}
+
+void kbmic_ble_svc_install_dispatch(void)
+{
+    esp_ble_gatts_register_callback(dispatch);
+}
+
+// ---------------------------------------------------------------------------
+// 对外
+// ---------------------------------------------------------------------------
+esp_err_t kbmic_ble_svc_init(void)
+{
+    // 配置先进内存,GATT 建表时才能把特征值指到正确的内容上。
+    kbmic_config_load();
+
+    const esp_err_t ret = esp_ble_gatts_app_register(KBMIC_SVC_APP_ID);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "注册 GATT app 失败: %s", esp_err_to_name(ret));
+    }
+    return ret;
+}
+
+void kbmic_ble_svc_notify(uint8_t type, uint8_t active, uint8_t aux, const char *name)
+{
+    if (!s_registered || !s_connected || s_evt_ccc == 0) {
+        return;   // 没人订阅是常态,不是错误
+    }
+    uint8_t buf[KBMIC_EV_MAX];
+    const size_t name_len = (name && *name) ? strnlen(name, KBMIC_EV_MAX - 5) : 0;
+    buf[0] = type;
+    buf[1] = active;
+    buf[2] = aux;
+    buf[3] = 0;
+    buf[4] = (uint8_t)name_len;
+    if (name_len) {
+        memcpy(&buf[5], name, name_len);
+    }
+    const esp_err_t ret = esp_ble_gatts_send_indicate(s_gatts_if, s_conn_id, s_handle[IDX_EVT_VAL],
+                                                      5 + name_len, buf, false);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "事件通知发送失败: %s", esp_err_to_name(ret));
+    }
+}

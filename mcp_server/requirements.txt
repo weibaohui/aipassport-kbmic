@@ -1,0 +1,8 @@
+# kbmic MCP 服务端依赖
+#
+#   python3 -m pip install -r requirements.txt
+#
+# bleak 在 macOS 上走 CoreBluetooth,因此需要给运行本服务的程序(终端 / IDE /
+# MCP 宿主)授予蓝牙权限:系统设置 → 隐私与安全性 → 蓝牙。
+bleak>=0.21
+mcp>=1.2

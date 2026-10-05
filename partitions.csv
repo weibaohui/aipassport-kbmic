@@ -1,0 +1,11 @@
+# AI 小键盘 分区表。
+#
+# 与 GLM 用量宝保持同一形状:应用本体 + 一个 FATFS 数据分区。
+# 设备本身不存音频也不存词库(识别在电脑/手机侧完成),files 分区预留给
+# 后续的固件包、字库与配置导入,当前应用不使用。
+#
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  0x6f0000,
+files,    data, fat,     0x700000, 0x100000,
