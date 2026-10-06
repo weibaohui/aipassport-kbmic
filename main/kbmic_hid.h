@@ -37,3 +37,7 @@ esp_err_t kbmic_hid_key_hold(uint8_t modifier, uint8_t apple_fn, uint8_t keycode
 
 // Consumer 报告的按下/释放。usage 见 KBMIC_HID_USAGE_GLOBE。
 esp_err_t kbmic_hid_consumer(uint16_t usage, bool pressed);
+
+// 断开并清空本机全部蓝牙绑定(排障用):设备立即回到广播态,
+// 主机侧需"忽略设备"后重新配对 —— 保证主机重新读取新的报告描述符。
+esp_err_t kbmic_hid_reset_bonds(void);

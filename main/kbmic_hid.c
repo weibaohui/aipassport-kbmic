@@ -94,17 +94,12 @@ static const uint8_t s_map_keyboard[] = {
     0x95, 0x08,        //   Report Count (8)
     0x81, 0x02,        //   Input (Data,Var,Abs)      -> 修饰键字节
 
-    // 原来的保留字节私有化为 Apple Fn:AppleVendor Top Case 页(0xFF),
-    // Usage 0x03(KeyboardFn)。macOS 由此识别 Fn/Globe(系统听写、微信
-    // 按住说话都认它),普通 6KRO 报告长度不变(8 字节)。参考:
-    // NordicBTKeyBridge / QMK AppleVendor Top Case 社区实现。
-    0x05, 0xFF,        //   Usage Page (AppleVendor Top Case)
-    0x09, 0x03,        //   Usage (KeyboardFn)
-    0x15, 0x00,        //   Logical Minimum (0)
-    0x25, 0x01,        //   Logical Maximum (1)
+    // 保留字节:经典 6KRO 布局(macOS 对第三方 vendor 页字段不认,曾把
+    // 整个键盘报告废掉,回车/退格全失效 —— 2026-10-06 真机教训)。
+    // 语音走 Consumer 页的 Globe(0x029D),macOS 官方识别为 Fn/听写。
     0x95, 0x01,        //   Report Count (1)
     0x75, 0x08,        //   Report Size (8)
-    0x81, 0x02,        //   Input (Data,Var,Abs)      -> Apple Fn 字节
+    0x81, 0x01,        //   Input (Cnst)              -> 保留字节
 
     // 这里**不能**再插 5 bit + 3 bit 的填充项。那是鼠标描述符的尾巴,
     // 键盘不需要:1 字节 modifier + 1 字节 reserved 已经把字节对齐了,
@@ -421,10 +416,10 @@ esp_err_t kbmic_hid_set_battery(int percent)
 esp_err_t kbmic_hid_key_hold(uint8_t modifier, uint8_t apple_fn, uint8_t keycode, bool pressed)
 {
     if (s_hid_dev == NULL || !kbmic_hid_connected()) return ESP_ERR_INVALID_STATE;
+    (void)apple_fn;   // Apple Fn 字节已随 vendor 字段回退移除;语音走 Globe
     uint8_t report[8] = {0};
     if (pressed) {
         report[0] = modifier;
-        report[1] = apple_fn ? 0x01 : 0x00;   // Apple Fn 字节(见描述符)
         report[2] = keycode;
     }
     return esp_hidd_dev_input_set(s_hid_dev, KBMIC_MAP_KEYBOARD, 0, report, sizeof(report));
@@ -448,4 +443,30 @@ esp_err_t kbmic_hid_consumer(uint16_t usage, bool pressed)
         report[2] = (uint8_t)(usage >> 8);
     }
     return esp_hidd_dev_input_set(s_hid_dev, KBMIC_MAP_CONSUMER, KBMIC_REPORT_ID_CONSUMER, report, sizeof(report));
+}
+
+// ---------------------------------------------------------------------------
+// 蓝牙复位(排障)
+// ---------------------------------------------------------------------------
+esp_err_t kbmic_hid_reset_bonds(void)
+{
+    int n = 0;
+    if (esp_ble_get_bond_device_list(&n, NULL) != ESP_OK || n <= 0) {
+        n = 0;
+    }
+    esp_ble_bond_dev_t list[8];
+    if (n > 8) n = 8;
+    if (n > 0 && esp_ble_get_bond_device_list(&n, list) != ESP_OK) {
+        n = 0;
+    }
+    int removed = 0;
+    for (int i = 0; i < n; i++) {
+        if (esp_ble_remove_bond_device(list[i].bd_addr) == ESP_OK) removed++;
+    }
+    // 删绑定后旧链路很快失效;停广播再重开,强制对端刷新并回到可连接态。
+    esp_ble_gap_stop_advertising();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    gap_adv_start();
+    ESP_LOGW(TAG, "蓝牙绑定已清(%d 台),设备重新广播;主机侧请忽略后重配", removed);
+    return ESP_OK;
 }

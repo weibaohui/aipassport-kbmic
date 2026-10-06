@@ -21,6 +21,7 @@
 #include "esp_system.h"
 #include "kbmic_action.h"
 #include "kbmic_hid.h"
+#include "esp_gap_ble_api.h"
 #include "kbmic_store.h"
 
 static const char *TAG = "kbmic_mcp";
@@ -575,6 +576,21 @@ static int tool_web_stop(cJSON *args, appfw_mcp_resp_t *resp)
     return 0;
 }
 
+// 蓝牙复位(排障):清设备端绑定并重开广播。主机配对缓存/绑定打架时用;
+// 调用后主机侧必须"忽略设备"再重新配对(会重新读取新的报告描述符)。
+static int tool_ble_reset(cJSON *args, appfw_mcp_resp_t *resp)
+{
+    (void)args;
+    const esp_err_t ret = kbmic_hid_reset_bonds();
+    if (ret != ESP_OK) {
+        appfw_mcp_resp_addf(resp, "复位失败: %s", esp_err_to_name(ret));
+        return 1;
+    }
+    appfw_mcp_resp_addf(resp, "设备端蓝牙绑定已清并重新广播;"
+                              "请在主机蓝牙设置里忽略本设备后重新配对");
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // 工具表与启动
 // ---------------------------------------------------------------------------
@@ -620,6 +636,8 @@ static const appfw_mcp_tool_t k_tools[] = {
     { "kbmic_wifi_remove_hotspot", "从已保存列表删除一个热点",
       "{\"type\":\"object\",\"properties\":{\"ssid\":{\"type\":\"string\"}},\"required\":[\"ssid\"]}",
       tool_wifi_remove },
+    { "kbmic_ble_reset", "蓝牙排障:清设备端全部绑定并重开广播(主机侧需忽略后重配对)",
+      "{}", tool_ble_reset },
     { "kbmic_web_start", "启动网页管理页(浏览器打开返回的 URL,页面含键盘设置卡片)。"
                          "用户想用网页改配置时调用;内存紧张,用完建议 kbmic_web_stop",
       "{}", tool_web_start },
