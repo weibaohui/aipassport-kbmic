@@ -88,7 +88,9 @@ python3 -m venv .venv
 
 ### Wi-Fi / HTTP(可选)
 
-如果 NVS 中已有保存的 Wi-Fi，且 BLE/UI 启动后堆内存足够，固件会启动 Wi-Fi、设备侧 MCP 服务和 appfw portal 中的键盘设置卡片。没有已保存 Wi-Fi 时，固件刻意不打开 SoftAP；BLE 配置仍然可用。
+当 BLE/UI 启动后堆内存足够时，固件会初始化 Wi-Fi。已保存的热点会自动回连；设备侧 MCP 服务只在 Wi-Fi 真正上线后启动。BLE 键盘始终保持最高优先级。
+
+配网必须手工开启：长按 OK 进入 **设置 → 配网**，连接屏幕显示的 SoftAP，打开 `http://192.168.4.1/` 保存热点。凭据保存、portal 关闭后，设备回连 Wi-Fi 并启动 MCP。固件不会自动打开 SoftAP。
 
 HTTP 端点支持读取/编辑按键槽、激活/新增/改名/删除模式，并与固件、桌面 MCP 使用同一个 17 项动作目录。
 

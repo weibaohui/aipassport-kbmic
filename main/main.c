@@ -33,8 +33,10 @@
 #define KEY_QUEUE_LEN          16
 #define KEY_TASK_STACK         4096
 #define KEY_TASK_PRIORITY      5
-#define WIFI_HTTP_MIN_FREE     (180 * 1024)
-#define WIFI_HTTP_MIN_LARGEST  (64 * 1024)
+// 实测 BLE HID/GATT/UI 启动后 free≈80KB、largest≈70KB。
+// 先用保守门槛实验 Wi-Fi STA + 轻量 MCP；portal/web 仍只能按需启动。
+#define NETWORK_MCP_MIN_FREE       (48 * 1024)
+#define NETWORK_MCP_MIN_LARGEST    (32 * 1024)
 
 typedef struct {
     bsp_btn_t button;
@@ -47,7 +49,17 @@ static volatile bool s_keys_ready;
 static bool s_held[KBMIC_BTN_COUNT];
 static bool s_in_long[KBMIC_BTN_COUNT];
 static bool s_ui_ready;
+static bool s_mcp_ready;
 static uint32_t s_dropped;
+
+static void log_network_heap(const char *stage)
+{
+    ESP_LOGI(TAG, "heap[%s]: free=%u largest=%u min_free=%u",
+             stage,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+}
 
 static const char *button_label(int button)
 {
@@ -213,6 +225,14 @@ static void app_task(void *arg)
                 (void)on_home_key(msg.button, event);
             }
         }
+        // 手工配网成功、portal 下线后才进入 ONLINE；此时再启动 MCP，
+        // 避免 SoftAP portal + HTTP + MCP 同时压垮无 PSRAM 的堆。
+        if (!s_mcp_ready && appfw_net_state() == APPFW_NET_ONLINE) {
+            kbmic_mcp_set_simulate(simulate_key);
+            kbmic_mcp_init();
+            s_mcp_ready = true;
+            log_network_heap("after_mcp_start_online");
+        }
         refresh_voice_indicator();
         const uint32_t dropped = __atomic_exchange_n(&s_dropped, 0, __ATOMIC_RELAXED);
         if (dropped) ESP_LOGW(TAG, "按键事件队列溢出，丢弃=%" PRIu32, dropped);
@@ -247,8 +267,8 @@ static bool network_start_if_headroom(void)
     const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
     ESP_LOGI(TAG, "BLE/UI 就绪后 heap: free=%u largest=%u",
              (unsigned)free_heap, (unsigned)largest);
-    if (free_heap < WIFI_HTTP_MIN_FREE || largest < WIFI_HTTP_MIN_LARGEST) {
-        ESP_LOGW(TAG, "内存保留给 BLE/显示/按键；跳过 Wi-Fi/HTTP，使用 BLE MCP 配置服务");
+    if (free_heap < NETWORK_MCP_MIN_FREE || largest < NETWORK_MCP_MIN_LARGEST) {
+        ESP_LOGW(TAG, "内存保留给 BLE/显示/按键；跳过 Wi-Fi/MCP，使用 BLE GATT 配置服务");
         return false;
     }
 
@@ -259,19 +279,16 @@ static bool network_start_if_headroom(void)
     appfw_prov_configure(&portal_cfg);
     appfw_netlist_t list;
     const bool has_saved_wifi = appfw_store_netlist_load(&list);
-    if (!has_saved_wifi) {
-        appfw_netlist_reset(&list);
-        ESP_LOGI(TAG, "无已保存 Wi-Fi；跳过 Wi-Fi/SoftAP/HTTP，使用 BLE MCP 配置服务");
-        return false;
-    }
-    const int err = appfw_net_init(&list, true);
+    ESP_LOGI(TAG, "已保存 Wi-Fi：%d 个；配网仅可从设置菜单手工开启",
+             has_saved_wifi ? list.count : 0);
+    log_network_heap("before_wifi_init");
+    const int err = appfw_net_init(&list, false);
     if (err != 0) {
-        ESP_LOGW(TAG, "Wi-Fi/HTTP 未启动(%d)，BLE MCP 配置保持可用", err);
+        ESP_LOGW(TAG, "Wi-Fi 初始化失败(%d)，BLE GATT 配置保持可用", err);
         return false;
     }
-    kbmic_mcp_set_simulate(simulate_key);
-    kbmic_mcp_init();
-    ESP_LOGI(TAG, "Wi-Fi/HTTP 与设备侧 MCP 已启动");
+    log_network_heap("after_wifi_init");
+    ESP_LOGI(TAG, "Wi-Fi 网络管理已就绪；MCP 等 Wi-Fi 上线后启动，配网仅手工开启");
     return true;
 }
 
@@ -321,12 +338,16 @@ void app_main(void)
         .home_build = kbmic_home_build,
         .home_poll = kbmic_home_poll,
         .full_key = full_key,
-        .menu_show_mask = APPFW_MENU_ITEM_SCREEN_OFF | APPFW_MENU_ITEM_BRIGHTNESS,
+        .menu_show_mask = APPFW_MENU_ITEM_SCREEN_OFF | APPFW_MENU_ITEM_BRIGHTNESS |
+                          APPFW_MENU_ITEM_PROVISIONING,
         .menu_navs = s_menu_navs,
         .menu_navs_count = 1,
         .menu_open_btn = 0xFF,
         .long_press_ok = APPFW_LONG_PRESS_OPEN_MENU,
     };
+    ESP_LOGI(TAG, "UI menu mask=0x%02x provisioning=%d",
+             ui_cfg.menu_show_mask,
+             (ui_cfg.menu_show_mask & APPFW_MENU_ITEM_PROVISIONING) != 0);
     if (bsp_lvgl_lock(1000)) {
         appfw_ui_init(&ui_cfg);
         bsp_lvgl_unlock();
