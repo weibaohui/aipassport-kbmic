@@ -79,6 +79,8 @@ static bool s_in_long[KBMIC_BTN_COUNT];      // 已经走过长按阈值
 static int s_battery = -1;
 static bool s_connected;
 
+void kbmic_voice_refresh(void);   // app_task 兜底刷新用(定义在 home_key 后)
+
 // 当前生效模式的某个槽。BLE 配置在外部被改过之后,这里每次都重新取,
 // 不缓存 —— 缓存就会和 MCP 的写入打架。
 static const kbmic_action_t *slot_of(int btn, int slot)
@@ -232,6 +234,7 @@ static void app_task(void *arg)
         }
 
         s_connected = kbmic_hid_connected();
+        kbmic_voice_refresh();   // 10Hz 兜底:事件丢失也不卡"说话中"
 
         if (++loop % 50 == 0) {
             const int soc = bsp_battery_soc();
@@ -318,7 +321,15 @@ static appfw_key_action_t kbmic_home_key(int btn, int ev)
         break;
     }
 
-    // 说话状态给主页大块显示:找按住中的键(TAP 触发、非软件动作)
+    kbmic_voice_refresh();
+    return APPFW_KEY_CONSUMED;
+}
+
+// 语音状态统一计算:找"TAP 触发且带 Consumer/Globe 或 AppleFn 步"的槽,
+// 返回其按键名;是否按住看 s_held。home_key 即时调用,app_task 周期兜底 ——
+// 即使某个按键事件丢失(表现为界面卡"说话中"),100ms 内自愈。
+void kbmic_voice_refresh(void)
+{
     const kbmic_config_t *cfg = kbmic_config_current();
     const char *voice_btn = NULL;
     bool active = false;
@@ -326,19 +337,18 @@ static appfw_key_action_t kbmic_home_key(int btn, int ev)
         for (int s = 0; s < KBMIC_SLOT_COUNT && !voice_btn; s++) {
             const kbmic_action_t *a = &cfg->profiles[cfg->active].slots[b][s];
             if (a->trigger != KBMIC_TRIG_TAP || kbmic_action_is_settings(a)) continue;
-            bool has_consumer = false, has_fn = false;
+            bool hit = false;
             for (int k = 0; k < a->step_count; k++) {
-                if (a->steps[k].kind == KBMIC_STEP_CONSUMER) has_consumer = true;
-                if (a->steps[k].kind == KBMIC_STEP_APPLEFN) has_fn = true;
+                if (a->steps[k].kind == KBMIC_STEP_CONSUMER ||
+                    a->steps[k].kind == KBMIC_STEP_APPLEFN) hit = true;
             }
-            if (has_consumer || has_fn) {
+            if (hit) {
                 voice_btn = btn_key_name(b);
                 active = s_held[b];
             }
         }
     }
     kbmic_ui_set_voice(active, voice_btn);
-    return APPFW_KEY_CONSUMED;
 }
 
 // ---------------------------------------------------------------------------

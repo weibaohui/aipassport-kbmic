@@ -76,36 +76,31 @@ static const char *TAG = "kbmic_hid";
 #define KBMIC_REPORT_ID_KEYBOARD 1
 #define KBMIC_REPORT_ID_CONSUMER 2
 
+// 单一 report map(一个 HID 服务):键盘报告 ID1(内嵌 Apple Fn 字节)
+// + 消费报告 ID2。与在 macOS 上验证可用的 NordicBTKeyBridge 完全同构;
+// 报文带 ID 前缀,esp-idf esp_hid 组件已按 HOGP 规范把特征长度补成
+// 「位宽/8 + 1」(本机补丁),前缀报文与特征长度严格匹配。
 static const uint8_t s_map_keyboard[] = {
     0x05, 0x01,        // Usage Page (Generic Desktop)
     0x09, 0x06,        // Usage (Keyboard)
     0xA1, 0x01,        // Collection (Application)
-    // 不带 Report ID:经典 8 字节键盘报告(modifier+Fn+6键)。
-    // 键盘与 Consumer 一个无 ID(隐式 0)一个有 ID(2),HID 规范允许并存,
-    // esp_hid 按各自 id 定位特征互不干扰 —— 也不踩"特征长度不含 ID 前缀"
-    // 的坑(esp_hid 的 max_len = 位宽/8,报文超出即被 GATT 拒,全键失效)。
+    0x85, 0x01,        //   Report ID (1)
     0x05, 0x07,        //   Usage Page (Key Codes)
-
-    0x19, 0xE0,        //   Usage Minimum (224 = LeftControl)
-    0x29, 0xE7,        //   Usage Maximum (231 = RightGUI)
+    0x19, 0xE0,        //   Usage Minimum (224)
+    0x29, 0xE7,        //   Usage Maximum (231)
     0x15, 0x00,        //   Logical Minimum (0)
     0x25, 0x01,        //   Logical Maximum (1)
     0x75, 0x01,        //   Report Size (1)
     0x95, 0x08,        //   Report Count (8)
-    0x81, 0x02,        //   Input (Data,Var,Abs)      -> 修饰键字节
+    0x81, 0x02,        //   Input (Data,Var,Abs)   -> 修饰键
 
-    // 保留字节:经典 6KRO 布局(macOS 对第三方 vendor 页字段不认,曾把
-    // 整个键盘报告废掉,回车/退格全失效 —— 2026-10-06 真机教训)。
-    // 语音走 Consumer 页的 Globe(0x029D),macOS 官方识别为 Fn/听写。
-    0x95, 0x01,        //   Report Count (1)
+    0x05, 0xFF,        //   Usage Page (AppleVendor Top Case)
+    0x09, 0x03,        //   Usage (KeyboardFn)
+    0x15, 0x00,        //   Logical Minimum (0)
+    0x25, 0x01,        //   Logical Maximum (1)
     0x75, 0x08,        //   Report Size (8)
-    0x81, 0x01,        //   Input (Cnst)              -> 保留字节
-
-    // 这里**不能**再插 5 bit + 3 bit 的填充项。那是鼠标描述符的尾巴,
-    // 键盘不需要:1 字节 modifier + 1 字节 reserved 已经把字节对齐了,
-    // 加上它们会让 Input 变成 9 字节。esp_hid 的描述符解析器会直接报
-    // "INPUT report does not amount to full bytes" 然后 panic —— 表现是
-    // 开机无限重启,屏幕一直闪。别照抄带填充的鼠标描述符。
+    0x95, 0x01,        //   Report Count (1)
+    0x81, 0x02,        //   Input (Data,Var,Abs)   -> Apple Fn 字节
 
     0x95, 0x06,        //   Report Count (6)
     0x75, 0x08,        //   Report Size (8)
@@ -113,23 +108,17 @@ static const uint8_t s_map_keyboard[] = {
     0x25, 0xDD,        //   Logical Maximum (221)
     0x19, 0x00,        //   Usage Minimum (0)
     0x29, 0xDD,        //   Usage Maximum (221)
-    0x81, 0x00,        //   Input (Data,Array)        -> 6 个键码
-
+    0x81, 0x00,        //   Input (Data,Array)    -> 6 键码
 
     0x05, 0x08,        //   Usage Page (LEDs)
-    0x19, 0x01,        //   Usage Minimum (1 = NumLock)
-    0x29, 0x05,        //   Usage Maximum (5 = Kana)
+    0x19, 0x01,        //   Usage Minimum (1)
+    0x29, 0x05,        //   Usage Maximum (5)
     0x75, 0x01,        //   Report Size (1)
     0x95, 0x05,        //   Report Count (5)
-    0x91, 0x02,        //   Output (Data,Var,Abs)     -> 主机发来的 LED 状态
-    //                        ↑ 必须是 0x91(Output),不是 0x81(Input)。写成 0x81
-    //                          会把这 5 bit 算进 Input 报告,Input 变成 69 bit
-    //                          而非 64 bit —— 同样表现为解析失败 + panic 重启。
-
+    0x91, 0x02,        //   Output (Data,Var,Abs) -> LED
     0x75, 0x03,        //   Report Size (3)
     0x95, 0x01,        //   Report Count (1)
-    0x91, 0x03,        //   Output (Cnst,Var,Abs)     -> 3 bit 填充
-
+    0x91, 0x01,        //   Output (Cnst)         -> LED 填充
     0xC0               // End Collection
 };
 
@@ -149,14 +138,13 @@ static const uint8_t s_map_consumer[] = {
     0x09, 0x01,        // Usage (Consumer Control)
     0xA1, 0x01,        // Collection (Application)
     0x85, 0x02,        //   Report ID (2)
-    0x15, 0x00,        //   Logical Minimum (0)        —— 0x15 = 1 字节形式
-    0x26, 0x9D, 0x02,  //   Logical Maximum (0x029D)   —— 0x26 = 2 字节形式
-    0x1A, 0x01, 0x00,  //   Usage Minimum (0x0001)     —— 0x1A = 2 字节形式
-    0x2A, 0x9D, 0x02,  //   Usage Maximum (0x029D)     —— 0x2A = 2 字节形式
-    0x75, 0x18,        //   Report Size (24) —— 3 字节:特征 max_len 需容下
-                       //   [ID+2B usage] 的线上报文(理由同键盘尾部保留字节)
+    0x15, 0x00,        //   Logical Minimum (0)
+    0x26, 0xFF, 0x03,  //   Logical Maximum (0x03FF)
+    0x19, 0x00,        //   Usage Minimum (0)
+    0x2A, 0xFF, 0x03,  //   Usage Maximum (0x03FF)
+    0x75, 0x10,        //   Report Size (16)
     0x95, 0x01,        //   Report Count (1)
-    0x81, 0x00,        //   Input (Data,Array)       -> 16 位 usage
+    0x81, 0x00,        //   Input (Data,Array)
     0xC0               // End Collection
 };
 
@@ -416,13 +404,14 @@ esp_err_t kbmic_hid_set_battery(int percent)
 esp_err_t kbmic_hid_key_hold(uint8_t modifier, uint8_t apple_fn, uint8_t keycode, bool pressed)
 {
     if (s_hid_dev == NULL || !kbmic_hid_connected()) return ESP_ERR_INVALID_STATE;
-    (void)apple_fn;   // Apple Fn 字节已随 vendor 字段回退移除;语音走 Globe
-    uint8_t report[8] = {0};
+    uint8_t report[9] = {0};
+    report[0] = KBMIC_REPORT_ID_KEYBOARD;          // 线上前缀 = Report ID
     if (pressed) {
-        report[0] = modifier;
-        report[2] = keycode;
+        report[1] = modifier;
+        report[2] = apple_fn ? 0x01 : 0x00;        // Apple Fn 字节(第 2 字节)
+        report[3] = keycode;
     }
-    return esp_hidd_dev_input_set(s_hid_dev, KBMIC_MAP_KEYBOARD, 0, report, sizeof(report));
+    return esp_hidd_dev_input_set(s_hid_dev, KBMIC_MAP_KEYBOARD, KBMIC_REPORT_ID_KEYBOARD, report, sizeof(report));
 }
 
 esp_err_t kbmic_hid_tap(uint8_t modifier, uint8_t keycode)
@@ -437,9 +426,9 @@ esp_err_t kbmic_hid_consumer(uint16_t usage, bool pressed)
 {
     if (s_hid_dev == NULL || !kbmic_hid_connected()) return ESP_ERR_INVALID_STATE;
     uint8_t report[3] = {0};
-    report[0] = KBMIC_REPORT_ID_CONSUMER;           // 线上前缀 = Report ID
+    report[0] = KBMIC_REPORT_ID_CONSUMER;          // 线上前缀 = Report ID
     if (pressed) {
-        report[1] = (uint8_t)(usage & 0xFF);        // 16 位小端
+        report[1] = (uint8_t)(usage & 0xFF);       // 16 位小端
         report[2] = (uint8_t)(usage >> 8);
     }
     return esp_hidd_dev_input_set(s_hid_dev, KBMIC_MAP_CONSUMER, KBMIC_REPORT_ID_CONSUMER, report, sizeof(report));
