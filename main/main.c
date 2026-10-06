@@ -93,9 +93,7 @@ static void release_held(int button)
     }
 }
 
-// appfw_ui_on_key 会规整事件：0=单击、2=双击、3=长按；4 保留给 LONG_UP。
-// 这里不再接受 BSP_BTN_CLICK=1，否则框架规整后的单击会被静默丢弃。
-static bool on_home_key(int button, int event)
+static bool on_home_key(int button, appfw_key_event_t event)
 {
     if (button < 0 || button >= KBMIC_BTN_COUNT) return true;
     const kbmic_action_t *tap = slot_of(button, KBMIC_SLOT_TAP);
@@ -103,17 +101,17 @@ static bool on_home_key(int button, int event)
     const kbmic_action_t *lng = slot_of(button, KBMIC_SLOT_LONG);
 
     switch (event) {
-    case 0: // appfw 单击
+    case APPFW_KEY_EV_CLICK:
         if (s_held[button]) {
             release_held(button);
         } else if (!s_in_long[button] && tap->trigger == KBMIC_TRIG_CLICK) {
             run_slot(button, KBMIC_SLOT_TAP);
         }
         break;
-    case 2: // appfw 双击
+    case APPFW_KEY_EV_DOUBLE:
         if (dbl->trigger == KBMIC_TRIG_DOUBLE) run_slot(button, KBMIC_SLOT_DOUBLE);
         break;
-    case 3: { // appfw 长按
+    case APPFW_KEY_EV_LONG: {
         s_in_long[button] = true;
         if (s_held[button]) break; // 某些长按会重复上报，不能反复释放/按下
         const bool settings = kbmic_action_is_settings(lng);
@@ -128,35 +126,20 @@ static bool on_home_key(int button, int event)
         }
         break;
     }
-    case BSP_BTN_LONG_UP:
+    case APPFW_KEY_EV_LONG_UP:
         release_held(button);
+        break;
+    case APPFW_KEY_EV_PRESS:
+        s_in_long[button] = false;
+        if (tap->trigger == KBMIC_TRIG_TAP) {
+            run_slot(button, KBMIC_SLOT_TAP);
+            s_held[button] = true;
+        }
         break;
     default:
         break;
     }
     return true;
-}
-
-static void press_held_slot(int button)
-{
-    if (button < 0 || button >= KBMIC_BTN_COUNT) return;
-    s_in_long[button] = false;
-    const kbmic_action_t *tap = slot_of(button, KBMIC_SLOT_TAP);
-    if (tap->trigger == KBMIC_TRIG_TAP) {
-        run_slot(button, KBMIC_SLOT_TAP);
-        s_held[button] = true;
-    }
-}
-
-static int normalized_home_event(bsp_btn_ev_t event)
-{
-    switch (event) {
-    case BSP_BTN_CLICK: return 0;
-    case BSP_BTN_DOUBLE: return 2;
-    case BSP_BTN_LONG: return 3;
-    case BSP_BTN_LONG_UP: return BSP_BTN_LONG_UP;
-    default: return -1;
-    }
 }
 
 static void refresh_voice_indicator(void)
@@ -182,7 +165,7 @@ static void refresh_voice_indicator(void)
     kbmic_ui_set_voice(active, voice_label);
 }
 
-static appfw_key_action_t home_key(int button, int event)
+static appfw_key_action_t full_key(int button, appfw_key_event_t event)
 {
     const bool consumed = on_home_key(button, event);
     refresh_voice_indicator();
@@ -221,16 +204,13 @@ static void app_task(void *arg)
     uint32_t ticks = 0;
     for (;;) {
         while (xQueueReceive(s_key_queue, &msg, 0) == pdTRUE) {
-            // appfw 会丢弃 PRESS 和 LONG_UP，但按住类动作必须在这两个事件上启停。
-            if (msg.event == BSP_BTN_PRESS) {
-                press_held_slot(msg.button);
-            } else if (msg.event == BSP_BTN_LONG_UP) {
-                (void)on_home_key(msg.button, BSP_BTN_LONG_UP);
-            } else if (s_ui_ready) {
+            appfw_key_event_t event;
+            if (!appfw_key_event_from_bsp(msg.event, &event)) continue;
+            if (s_ui_ready) {
                 appfw_ui_on_key(msg.button, msg.event);
             } else {
-                const int event = normalized_home_event(msg.event);
-                if (event >= 0) (void)on_home_key(msg.button, event);
+                // 显示初始化失败时键盘必须继续工作；映射仍复用 appfw 的纯逻辑。
+                (void)on_home_key(msg.button, event);
             }
         }
         refresh_voice_indicator();
@@ -340,7 +320,7 @@ void app_main(void)
         .home_title = "AI小键盘",
         .home_build = kbmic_home_build,
         .home_poll = kbmic_home_poll,
-        .home_key = home_key,
+        .full_key = full_key,
         .menu_show_mask = APPFW_MENU_ITEM_SCREEN_OFF | APPFW_MENU_ITEM_BRIGHTNESS,
         .menu_navs = s_menu_navs,
         .menu_navs_count = 1,
