@@ -50,6 +50,9 @@ static bool s_held[KBMIC_BTN_COUNT];
 static bool s_in_long[KBMIC_BTN_COUNT];
 static bool s_ui_ready;
 static bool s_mcp_ready;
+static bool s_provisioning;
+static TickType_t s_provisioning_started;
+static bool s_provisioning_portal_seen;
 static uint32_t s_dropped;
 
 static void log_network_heap(const char *stage)
@@ -184,6 +187,20 @@ static appfw_key_action_t full_key(int button, appfw_key_event_t event)
     return consumed ? APPFW_KEY_CONSUMED : APPFW_KEY_MENU;
 }
 
+// 框架在 portal HTTP/SoftAP 启动前调用。进入手工配网是显式临时模态，
+// 这里卸载 BLE，把内存和单射频让给 SoftAP/DHCP/HTTP。
+void appfw_portal_pre_start_hook(void)
+{
+    if (s_provisioning) return;
+    s_provisioning = true;
+    s_provisioning_started = xTaskGetTickCount();
+    (void)kbmic_action_release();
+    const esp_err_t err = kbmic_hid_stop_for_provisioning();
+    log_network_heap("after_ble_unload_for_provisioning");
+    kbmic_ui_set_feedback(err == ESP_OK ? "已卸载蓝牙，进入配网" : "配网卸载蓝牙失败",
+                          err == ESP_OK);
+}
+
 static void key_callback(bsp_btn_t button, bsp_btn_ev_t event, void *user)
 {
     (void)user;
@@ -225,9 +242,36 @@ static void app_task(void *arg)
                 (void)on_home_key(msg.button, event);
             }
         }
-        // 手工配网成功、portal 下线后才进入 ONLINE；此时再启动 MCP，
-        // 避免 SoftAP portal + HTTP + MCP 同时压垮无 PSRAM 的堆。
-        if (!s_mcp_ready && appfw_net_state() == APPFW_NET_ONLINE) {
+        if (s_provisioning) {
+            appfw_net_status_t st;
+            appfw_net_get_status(&st);
+            const TickType_t elapsed = xTaskGetTickCount() - s_provisioning_started;
+            if (st.portal_active) s_provisioning_portal_seen = true;
+
+            // portal 保存并连接成功后进入 ONLINE；重启恢复 BLE 键盘，
+            // 重启后走“已保存 Wi-Fi 自动连接 + MCP”的正常路径。
+            if (s_provisioning_portal_seen && st.state == APPFW_NET_ONLINE) {
+                ESP_LOGW(TAG, "provisioning complete; restart to restore BLE keyboard");
+                kbmic_ui_set_feedback("配网完成，3 秒后重启恢复蓝牙", true);
+                vTaskDelay(pdMS_TO_TICKS(3000));
+                esp_restart();
+            }
+
+            // 用户手工关闭 portal 但没完成配网，也重启恢复 BLE 键盘。
+            if (s_provisioning_portal_seen && !st.portal_active &&
+                st.state != APPFW_NET_CONNECTING &&
+                st.state != APPFW_NET_SCANNING &&
+                elapsed > pdMS_TO_TICKS(5000)) {
+                ESP_LOGW(TAG, "manual provisioning closed; restart to restore BLE keyboard");
+                esp_restart();
+            }
+
+            // portal 一直没打开也要重启恢复键盘，避免手工配网把蓝牙丢掉。
+            if (!s_provisioning_portal_seen && elapsed > pdMS_TO_TICKS(10000)) {
+                ESP_LOGW(TAG, "provisioning portal never started; restart to restore BLE keyboard");
+                esp_restart();
+            }
+        } else if (!s_mcp_ready && appfw_net_state() == APPFW_NET_ONLINE) {
             kbmic_mcp_set_simulate(simulate_key);
             kbmic_mcp_init();
             s_mcp_ready = true;
@@ -273,8 +317,6 @@ static bool network_start_if_headroom(void)
     }
 
     static const appfw_prov_cfg_t portal_cfg = {
-        .app_config_html = kbmic_web_html,
-        .on_httpd_ready = kbmic_web_register,
     };
     appfw_prov_configure(&portal_cfg);
     appfw_netlist_t list;

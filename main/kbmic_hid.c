@@ -185,6 +185,28 @@ esp_err_t kbmic_hid_init(void)
     return ret;
 }
 
+esp_err_t kbmic_hid_stop_for_provisioning(void)
+{
+    // 先撤 HID 设备；它会断开主机并清理 HIDD 的 GATT 接口。
+    if (s_hid_dev) {
+        (void)esp_hidd_dev_deinit(s_hid_dev);
+        s_hid_dev = NULL;
+    }
+    s_connected = false;
+    s_boot_notify = false;
+
+    // Bluedroid/controller 的顺序必须自上而下；这里按 ESP-IDF 的 BLE-only
+    // 释放示例执行。esp_bt_mem_release 不可逆，恢复键盘靠配网完成后重启。
+    (void)esp_bluedroid_disable();
+    (void)esp_bluedroid_deinit();
+    (void)esp_bt_controller_disable();
+    (void)esp_bt_controller_deinit();
+    const esp_err_t ret = esp_bt_mem_release(ESP_BT_MODE_BLE);
+    ESP_LOGW(TAG, "BLE unloaded for provisioning: mem_release=%s",
+             esp_err_to_name(ret));
+    return ret;
+}
+
 bool kbmic_hid_connected(void)
 {
     return s_connected && s_hid_dev != NULL && esp_hidd_dev_connected(s_hid_dev);

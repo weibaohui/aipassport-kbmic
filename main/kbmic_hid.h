@@ -13,6 +13,10 @@
 // 设备名固定为"AI小键盘"。成功时已处于广播态,等待主机连接。
 esp_err_t kbmic_hid_init(void);
 
+// 手工 Wi-Fi 配网的临时模态：卸载当前 BLE HID/Bluedroid/controller 并释放
+// BLE 内存，把 RAM 和单射频让给 SoftAP portal。释放不可逆，恢复键盘需重启。
+esp_err_t kbmic_hid_stop_for_provisioning(void);
+
 // 主机是否已连接。未连接时所有发送接口会安静失败(返回 ESP_ERR_INVALID_STATE),
 // 不打印错误 —— 蓝牙键盘在未配对时按鍵是常态,不是故障。
 bool kbmic_hid_connected(void);

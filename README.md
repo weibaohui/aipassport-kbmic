@@ -90,7 +90,7 @@ Point your MCP client at `.venv/bin/python` and `server.py`. The bridge exposes 
 
 When BLE/UI startup leaves enough heap, the firmware initializes Wi-Fi. Saved networks reconnect automatically, and the device-side MCP service starts only after the device is online. BLE keyboard operation remains the first priority.
 
-Provisioning is always manual: long-press OK, open **Settings → 配网 / Provisioning**, then connect to the displayed SoftAP and open `http://192.168.4.1/`. After credentials are saved and the portal closes, the device reconnects to Wi-Fi and starts MCP. The firmware never opens the SoftAP automatically.
+Provisioning is always manual: long-press OK, open **Settings -> Provisioning**, then connect to the displayed SoftAP and open `http://192.168.4.1/`. After credentials are saved and the portal closes, the device reconnects to Wi-Fi and starts MCP. The firmware never opens the SoftAP automatically.
 
 HTTP endpoints cover read/edit key slots, activate/add/rename/delete profiles, and use the same 17-preset catalog as the firmware and desktop MCP.
 

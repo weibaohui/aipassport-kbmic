@@ -489,7 +489,10 @@ static int tool_wifi_add(cJSON *args, appfw_mcp_resp_t *resp)
         return 1;
     }
     (void)appfw_netlist_select(&list, ssid->valuestring);   // 新加的设为首选
-    (void)appfw_store_netlist_save(&list);
+    if (!appfw_store_netlist_save(&list)) {
+        appfw_mcp_resp_addf(resp, "已添加到内存,但 NVS 保存失败;重启后会丢失");
+        return 1;
+    }
     appfw_net_reload_config();
     if (cJSON_IsTrue(now)) {
         appfw_net_connect_ssid(ssid->valuestring);
@@ -540,7 +543,10 @@ static int tool_wifi_remove(cJSON *args, appfw_mcp_resp_t *resp)
         appfw_mcp_resp_addf(resp, "删除失败:列表为空或没有这个热点");
         return 1;
     }
-    (void)appfw_store_netlist_save(&list);
+    if (!appfw_store_netlist_save(&list)) {
+        appfw_mcp_resp_addf(resp, "NVS 保存失败;热点未被真正删除");
+        return 1;
+    }
     appfw_net_reload_config();
     appfw_mcp_resp_addf(resp, "已删除热点 %s", ssid->valuestring);
     return 0;
