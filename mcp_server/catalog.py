@@ -205,42 +205,30 @@ def _default_builtin_profiles() -> list[Profile]:
     def blank() -> list[list[Action]]:
         return [[Action() for _ in range(P.SLOT_COUNT)] for _ in range(P.BTN_COUNT)]
 
-    def fill(prof: Profile, ok_tap: Action) -> Profile:
-        # 三个内置模式的 Up/Down 完全一样,只有 OK 的按住动作不同。
-        prof.set_slot(P.BTN_UP, P.SLOT_TAP, action_click(step_key(KEY_ENTER)))
+    def fill(prof: Profile, voice_step: Step) -> Profile:
+        # 四模式统一键位(用户定稿 2026-10-06 三改):
+        # 短按下=回车,双击下=Esc,短按OK=退格,长按OK=进设置,
+        # 长按上=按住语音键(voice_step 平台变体),其余槽留空。
+        prof.set_slot(P.BTN_UP, P.SLOT_TAP, action_none())
         prof.set_slot(P.BTN_UP, P.SLOT_DOUBLE, action_none())
-        prof.set_slot(P.BTN_UP, P.SLOT_LONG, _enter_triple())
-        prof.set_slot(P.BTN_DOWN, P.SLOT_TAP, action_click(step_key(KEY_BACKSPACE)))
-        prof.set_slot(P.BTN_DOWN, P.SLOT_DOUBLE, action_none())
-        prof.set_slot(P.BTN_DOWN, P.SLOT_LONG, action_settings())
-        prof.set_slot(P.BTN_OK, P.SLOT_TAP, ok_tap)
+        prof.set_slot(P.BTN_UP, P.SLOT_LONG, action_tap(voice_step))
+        prof.set_slot(P.BTN_DOWN, P.SLOT_TAP, action_click(step_key(KEY_ENTER)))
+        prof.set_slot(P.BTN_DOWN, P.SLOT_DOUBLE, action_click(step_key(0x29)))   # Esc
+        prof.set_slot(P.BTN_DOWN, P.SLOT_LONG, action_none())
+        prof.set_slot(P.BTN_OK, P.SLOT_TAP, action_click(step_key(KEY_BACKSPACE)))
         prof.set_slot(P.BTN_OK, P.SLOT_DOUBLE, action_none())
-        # OK 长按留空(Mac 除外,见下):说话=按住某键,长按阈值必然落在
-        # 按住途中,长按槽再配 HID 动作会被松手切断。
-        prof.set_slot(P.BTN_OK, P.SLOT_LONG, action_none())
+        prof.set_slot(P.BTN_OK, P.SLOT_LONG, action_settings())
         return prof
 
     mac = fill(Profile(name="Mac", builtin=1, slots=blank()),
-               action_tap(step_consumer(USAGE_GLOBE)))
-    # Mac 键位(用户定稿 2026-10-06 二改):
-    #   长按上键 = 按住 Fn/Globe 说话(按住=按下,松开=抬起);短按上键=无;
-    #   短按下键 = 回车;双击下键 = Esc;长按下键 = 无;
-    #   短按 OK = 退格;长按 OK = 进设置。
-    mac.set_slot(P.BTN_UP, P.SLOT_TAP, action_none())
-    mac.set_slot(P.BTN_UP, P.SLOT_LONG, action_tap(step_consumer(USAGE_GLOBE)))
-    mac.set_slot(P.BTN_DOWN, P.SLOT_TAP, action_click(step_key(KEY_ENTER)))
-    mac.set_slot(P.BTN_DOWN, P.SLOT_DOUBLE,
-                 action_click(step_key(0x29)))      # Esc = 0x29
-    mac.set_slot(P.BTN_DOWN, P.SLOT_LONG, action_none())
-    mac.set_slot(P.BTN_OK, P.SLOT_TAP, action_click(step_key(KEY_BACKSPACE)))
-    mac.set_slot(P.BTN_OK, P.SLOT_LONG, action_settings())
+               Step(kind=STEP_APPLEFN))   # Mac 语音 = Apple Fn 按住
     windows = fill(Profile(name="Windows", builtin=1, slots=blank()),
-                   action_tap(step_key(0, MOD_CTRL_GUI)))
+                   step_key(0, MOD_CTRL_GUI))
     android = fill(Profile(name="Android", builtin=1, slots=blank()),
-                   action_tap(step_key(KEY_SPACE)))
+                   step_key(KEY_SPACE))
     # iOS 与 Mac 相同(发 Globe)。固件注释已标明:未经实机验证,不通就直接用 MCP 改。
     ios = fill(Profile(name="iOS", builtin=1, slots=blank()),
-               action_tap(step_consumer(USAGE_GLOBE)))
+               step_consumer(USAGE_GLOBE))
     return [mac, windows, android, ios]
 
 

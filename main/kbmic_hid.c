@@ -119,6 +119,14 @@ static const uint8_t s_map_keyboard[] = {
     0x29, 0xDD,        //   Usage Maximum (221)
     0x81, 0x00,        //   Input (Data,Array)        -> 6 个键码
 
+    // 尾部保留字节:把 Input 凑到 9 字节。esp_hid 用位宽/8 当特征 max_length
+    // (不含 Report ID 前缀),9 字节报告的特征才装得下 [ID+8B数据] 的线上
+    // 报文;少这 1 字节 GATT 直接拒绝发送,全部按键失效(2026-10-06 踩坑)。
+    // 主机按报告前 8 字节解析,保留字节不参与。
+    0x95, 0x01,        //   Report Count (1)
+    0x75, 0x08,        //   Report Size (8)
+    0x81, 0x01,        //   Input (Cnst)              -> 保留(线上不发,主机补零)
+
     0x05, 0x08,        //   Usage Page (LEDs)
     0x19, 0x01,        //   Usage Minimum (1 = NumLock)
     0x29, 0x05,        //   Usage Maximum (5 = Kana)
@@ -156,7 +164,8 @@ static const uint8_t s_map_consumer[] = {
     0x26, 0x9D, 0x02,  //   Logical Maximum (0x029D)   —— 0x26 = 2 字节形式
     0x1A, 0x01, 0x00,  //   Usage Minimum (0x0001)     —— 0x1A = 2 字节形式
     0x2A, 0x9D, 0x02,  //   Usage Maximum (0x029D)     —— 0x2A = 2 字节形式
-    0x75, 0x10,        //   Report Size (16)
+    0x75, 0x18,        //   Report Size (24) —— 3 字节:特征 max_len 需容下
+                       //   [ID+2B usage] 的线上报文(理由同键盘尾部保留字节)
     0x95, 0x01,        //   Report Count (1)
     0x81, 0x00,        //   Input (Data,Array)       -> 16 位 usage
     0xC0               // End Collection
@@ -418,11 +427,16 @@ esp_err_t kbmic_hid_set_battery(int percent)
 esp_err_t kbmic_hid_key_hold(uint8_t modifier, uint8_t apple_fn, uint8_t keycode, bool pressed)
 {
     if (s_hid_dev == NULL || !kbmic_hid_connected()) return ESP_ERR_INVALID_STATE;
-    uint8_t report[8] = {0};
+    // 描述符声明了 Report ID 之后,线上报文的第一个字节必须是该 ID
+    // (HID over GATT 规范;esp_hidd_dev_input_set 原样转发,不会替你加)。
+    // 漏了这个前缀,macOS 会把整条报文当非法丢弃 —— 一个键都不响
+    // (2026-10-06 真机踩坑,报文 8→9 字节)。
+    uint8_t report[9] = {0};
+    report[0] = KBMIC_REPORT_ID_KEYBOARD;
     if (pressed) {
-        report[0] = modifier;
-        report[1] = apple_fn ? 0x01 : 0x00;   // Apple Fn 字节(见描述符)
-        report[2] = keycode;
+        report[1] = modifier;
+        report[2] = apple_fn ? 0x01 : 0x00;   // Apple Fn 字节(见描述符)
+        report[3] = keycode;
     }
     return esp_hidd_dev_input_set(s_hid_dev, KBMIC_MAP_KEYBOARD, KBMIC_REPORT_ID_KEYBOARD, report, sizeof(report));
 }
@@ -438,10 +452,11 @@ esp_err_t kbmic_hid_tap(uint8_t modifier, uint8_t keycode)
 esp_err_t kbmic_hid_consumer(uint16_t usage, bool pressed)
 {
     if (s_hid_dev == NULL || !kbmic_hid_connected()) return ESP_ERR_INVALID_STATE;
-    uint8_t report[2] = {0};
+    uint8_t report[3] = {0};
+    report[0] = KBMIC_REPORT_ID_CONSUMER;           // 线上前缀 = Report ID
     if (pressed) {
-        report[0] = (uint8_t)(usage & 0xFF);        // 16 位小端
-        report[1] = (uint8_t)(usage >> 8);
+        report[1] = (uint8_t)(usage & 0xFF);        // 16 位小端
+        report[2] = (uint8_t)(usage >> 8);
     }
     return esp_hidd_dev_input_set(s_hid_dev, KBMIC_MAP_CONSUMER, KBMIC_REPORT_ID_CONSUMER, report, sizeof(report));
 }

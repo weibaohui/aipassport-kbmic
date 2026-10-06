@@ -84,21 +84,24 @@ static kbmic_action_t action_none(void)
 
 // 四个内置模式的公共键位:上=回车(长按连发三次)、下=退格(长按进设置)、
 // OK=语音(按平台不同,按住说话)。
+// 四模式统一键位(用户定稿 2026-10-06 三改):
+//   短按下=回车,双击下=Esc,短按 OK=退格,长按 OK=进设置,
+//   长按上=按住语音键说话(平台变体由 voice_step 传入),
+//   其余槽留空(用户可经 MCP/网页自定义)。
 static void fill_common_slots(kbmic_profile_t *p, kbmic_step_t voice_step)
 {
-    p->slots[KBMIC_BTN_UP][KBMIC_SLOT_TAP] =
-        action_click((kbmic_step_t[]){step_key(0, KBMIC_HID_KEY_ENTER)}, 1);
-    p->slots[KBMIC_BTN_UP][KBMIC_SLOT_LONG] = action_click(
-        (kbmic_step_t[]){step_key(0, KBMIC_HID_KEY_ENTER), step_key(0, KBMIC_HID_KEY_ENTER),
-                         step_key(0, KBMIC_HID_KEY_ENTER)},
-        3);
+    p->slots[KBMIC_BTN_UP][KBMIC_SLOT_TAP] = action_none();
+    p->slots[KBMIC_BTN_UP][KBMIC_SLOT_DOUBLE] = action_none();
+    p->slots[KBMIC_BTN_UP][KBMIC_SLOT_LONG] = action_tap(voice_step);
     p->slots[KBMIC_BTN_DOWN][KBMIC_SLOT_TAP] =
+        action_click((kbmic_step_t[]){step_key(0, KBMIC_HID_KEY_ENTER)}, 1);
+    p->slots[KBMIC_BTN_DOWN][KBMIC_SLOT_DOUBLE] =
+        action_click((kbmic_step_t[]){step_key(0, KBMIC_HID_KEY_ESCAPE)}, 1);
+    p->slots[KBMIC_BTN_DOWN][KBMIC_SLOT_LONG] = action_none();
+    p->slots[KBMIC_BTN_OK][KBMIC_SLOT_TAP] =
         action_click((kbmic_step_t[]){step_key(0, KBMIC_HID_KEY_BACKSPACE)}, 1);
-    p->slots[KBMIC_BTN_DOWN][KBMIC_SLOT_DOUBLE] = action_none();
-    p->slots[KBMIC_BTN_DOWN][KBMIC_SLOT_LONG] = action_settings();
-    p->slots[KBMIC_BTN_OK][KBMIC_SLOT_TAP] = action_tap(voice_step);
     p->slots[KBMIC_BTN_OK][KBMIC_SLOT_DOUBLE] = action_none();
-    p->slots[KBMIC_BTN_OK][KBMIC_SLOT_LONG] = action_none();
+    p->slots[KBMIC_BTN_OK][KBMIC_SLOT_LONG] = action_settings();
 }
 
 // ---------------------------------------------------------------------------
@@ -114,27 +117,8 @@ void kbmic_config_defaults(kbmic_config_t *cfg)
     // --- Mac:微信电脑版按住 Fn 触发语音 ---
     strcpy(cfg->profiles[0].name, "Mac");
     cfg->profiles[0].builtin = 1;
-    fill_common_slots(&cfg->profiles[0], step_consumer(KBMIC_HID_USAGE_GLOBE));
-
-    // Mac 键位(用户定稿 2026-10-06 二改,与通用键位不同):
-    //   长按上键 = 按住 Fn/Globe 说话 —— 按住=Fn 按下,松开=Fn 抬起;
-    //   短按上键 = 无(用户明确去掉);
-    //   短按下键 = 回车;双击下键 = Esc;长按下键 = 无(用户明确去掉);
-    //   短按 OK = 退格;长按 OK = 进设置。
-    //   OK 短按是 CLICK 触发的退格,按住超 500ms 走长按进设置,意图天然分开。
-    cfg->profiles[0].slots[KBMIC_BTN_UP][KBMIC_SLOT_TAP] = action_none();
-    cfg->profiles[0].slots[KBMIC_BTN_UP][KBMIC_SLOT_LONG] =
-        action_tap(step_consumer(KBMIC_HID_USAGE_GLOBE));
-    cfg->profiles[0].slots[KBMIC_BTN_DOWN][KBMIC_SLOT_TAP] =
-        action_click((kbmic_step_t[]){step_key(0, KBMIC_HID_KEY_ENTER)}, 1);
-    cfg->profiles[0].slots[KBMIC_BTN_DOWN][KBMIC_SLOT_DOUBLE] =
-        action_click((kbmic_step_t[]){step_key(0, KBMIC_HID_KEY_ESCAPE)}, 1);
-    cfg->profiles[0].slots[KBMIC_BTN_DOWN][KBMIC_SLOT_DOUBLE].trigger =
-        KBMIC_TRIG_DOUBLE;   // 双击槽的动作一律 DOUBLE 触发(与 BSP 双击事件对应)
-    cfg->profiles[0].slots[KBMIC_BTN_DOWN][KBMIC_SLOT_LONG] = action_none();
-    cfg->profiles[0].slots[KBMIC_BTN_OK][KBMIC_SLOT_TAP] =
-        action_click((kbmic_step_t[]){step_key(0, KBMIC_HID_KEY_BACKSPACE)}, 1);
-    cfg->profiles[0].slots[KBMIC_BTN_OK][KBMIC_SLOT_LONG] = action_settings();
+    fill_common_slots(&cfg->profiles[0],
+                      (kbmic_step_t){ .kind = KBMIC_STEP_APPLEFN });   // Mac 语音 = Apple Fn 按住
 
     // --- Windows:微信电脑版按住 Ctrl+Win ---
     strcpy(cfg->profiles[1].name, "Windows");

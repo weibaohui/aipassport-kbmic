@@ -263,24 +263,20 @@ class TestActionNames(unittest.TestCase):
     def test_names_of_all_builtin_default_slots(self):
         cfg = catalog.factory_default_config()
         expect = {
-            # Mac 键位(用户定稿 2026-10-06 二改):长按上键=按住Fn说话,
-            # 短按上键=无;短按下键=回车,双击下键=Esc,长按下键=无;
-            # 短按 OK=退格,长按 OK=进设置。
+            # 四模式统一键位(用户定稿三改):短按下=Enter,双击下=Esc,
+            # 短按OK=Back,长按OK=Settings,长按上=按住语音键(平台变体)。
             (0, P.BTN_UP, P.SLOT_TAP): "-",
-            (0, P.BTN_UP, P.SLOT_LONG): "Globe (hold)",
+            (0, P.BTN_UP, P.SLOT_LONG): "Fn (hold)",          # Mac = Apple Fn
             (0, P.BTN_DOWN, P.SLOT_TAP): "Enter",
             (0, P.BTN_DOWN, P.SLOT_DOUBLE): "Esc",
             (0, P.BTN_DOWN, P.SLOT_LONG): "-",
             (0, P.BTN_OK, P.SLOT_TAP): "Back",
             (0, P.BTN_OK, P.SLOT_LONG): "Settings",
-            # 其余三模式:通用键位(Up/Down 一样,OK 长按留空)。
-            (1, P.BTN_UP, P.SLOT_TAP): "Enter",
-            (1, P.BTN_DOWN, P.SLOT_TAP): "Back",
-            (1, P.BTN_DOWN, P.SLOT_LONG): "Settings",
-            (1, P.BTN_OK, P.SLOT_LONG): "-",
-            (1, P.BTN_OK, P.SLOT_TAP): "Ctrl+Win (hold)",
-            (2, P.BTN_OK, P.SLOT_TAP): "Space (hold)",
-            (3, P.BTN_OK, P.SLOT_TAP): "Globe (hold)",
+            (1, P.BTN_UP, P.SLOT_LONG): "Ctrl+Win (hold)",    # Windows
+            (1, P.BTN_OK, P.SLOT_TAP): "Back",
+            (1, P.BTN_OK, P.SLOT_LONG): "Settings",
+            (2, P.BTN_UP, P.SLOT_LONG): "Space (hold)",       # Android
+            (3, P.BTN_UP, P.SLOT_LONG): "Globe (hold)",       # iOS
         }
         for (i, b, s), want in expect.items():
             got = P.action_name(cfg.profiles[i].get_slot(b, s))
