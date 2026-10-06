@@ -80,9 +80,10 @@ static const uint8_t s_map_keyboard[] = {
     0x05, 0x01,        // Usage Page (Generic Desktop)
     0x09, 0x06,        // Usage (Keyboard)
     0xA1, 0x01,        // Collection (Application)
-    0x85, 0x01,        //   Report ID (1) —— 两个报告并存必须各带 ID,否则 macOS
-                       //   会把两个都绑到先解析到的那个特征上(真机踩坑:
-                       //   没有 ID 时 Consumer 报告被发进键盘特征,Globe/Fn 不识别)
+    // 不带 Report ID:经典 8 字节键盘报告(modifier+Fn+6键)。
+    // 键盘与 Consumer 一个无 ID(隐式 0)一个有 ID(2),HID 规范允许并存,
+    // esp_hid 按各自 id 定位特征互不干扰 —— 也不踩"特征长度不含 ID 前缀"
+    // 的坑(esp_hid 的 max_len = 位宽/8,报文超出即被 GATT 拒,全键失效)。
     0x05, 0x07,        //   Usage Page (Key Codes)
 
     0x19, 0xE0,        //   Usage Minimum (224 = LeftControl)
@@ -119,13 +120,6 @@ static const uint8_t s_map_keyboard[] = {
     0x29, 0xDD,        //   Usage Maximum (221)
     0x81, 0x00,        //   Input (Data,Array)        -> 6 个键码
 
-    // 尾部保留字节:把 Input 凑到 9 字节。esp_hid 用位宽/8 当特征 max_length
-    // (不含 Report ID 前缀),9 字节报告的特征才装得下 [ID+8B数据] 的线上
-    // 报文;少这 1 字节 GATT 直接拒绝发送,全部按键失效(2026-10-06 踩坑)。
-    // 主机按报告前 8 字节解析,保留字节不参与。
-    0x95, 0x01,        //   Report Count (1)
-    0x75, 0x08,        //   Report Size (8)
-    0x81, 0x01,        //   Input (Cnst)              -> 保留(线上不发,主机补零)
 
     0x05, 0x08,        //   Usage Page (LEDs)
     0x19, 0x01,        //   Usage Minimum (1 = NumLock)
@@ -427,18 +421,13 @@ esp_err_t kbmic_hid_set_battery(int percent)
 esp_err_t kbmic_hid_key_hold(uint8_t modifier, uint8_t apple_fn, uint8_t keycode, bool pressed)
 {
     if (s_hid_dev == NULL || !kbmic_hid_connected()) return ESP_ERR_INVALID_STATE;
-    // 描述符声明了 Report ID 之后,线上报文的第一个字节必须是该 ID
-    // (HID over GATT 规范;esp_hidd_dev_input_set 原样转发,不会替你加)。
-    // 漏了这个前缀,macOS 会把整条报文当非法丢弃 —— 一个键都不响
-    // (2026-10-06 真机踩坑,报文 8→9 字节)。
-    uint8_t report[9] = {0};
-    report[0] = KBMIC_REPORT_ID_KEYBOARD;
+    uint8_t report[8] = {0};
     if (pressed) {
-        report[1] = modifier;
-        report[2] = apple_fn ? 0x01 : 0x00;   // Apple Fn 字节(见描述符)
-        report[3] = keycode;
+        report[0] = modifier;
+        report[1] = apple_fn ? 0x01 : 0x00;   // Apple Fn 字节(见描述符)
+        report[2] = keycode;
     }
-    return esp_hidd_dev_input_set(s_hid_dev, KBMIC_MAP_KEYBOARD, KBMIC_REPORT_ID_KEYBOARD, report, sizeof(report));
+    return esp_hidd_dev_input_set(s_hid_dev, KBMIC_MAP_KEYBOARD, 0, report, sizeof(report));
 }
 
 esp_err_t kbmic_hid_tap(uint8_t modifier, uint8_t keycode)

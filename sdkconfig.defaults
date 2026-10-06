@@ -62,9 +62,10 @@ CONFIG_LV_FONT_MONTSERRAT_20=y
 # #include <值>。留空会生成 #include "" 从而编译失败,所以必须显式给一个
 # 存在的头文件 —— 与 aipassport-glm 保持一致。
 CONFIG_LV_ASSERT_HANDLER_INCLUDE="assert.h"
-# LVGL 自带的 malloc 池。实测 12 KB 会在建 UI 对象时分配失败直接崩
-# (Load access fault,2026-10-06 真机踩坑);16 KB 是本应用的下限。
-CONFIG_LV_MEM_SIZE_KILOBYTES=16
+# LVGL 内存:直接用系统堆(CLIB malloc),不设预留池。BLE+WiFi 共存下
+# 内存紧张,16KB 内置池建不了框架设置菜单(分配失败 → NULL 解引用崩溃,
+# 2026-10-06 真机踩坑);共享堆按需借还,菜单峰值 ~30KB 也能过。
+CONFIG_LV_USE_CLIB_MALLOC=y
 
 # 框架 appfw_ui 的配网页用 lv_qrcode 渲染 WiFi 二维码,
 # 框架组件整体参与编译,不配网的应用也要开,否则编译失败。
