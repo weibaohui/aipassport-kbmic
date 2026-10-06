@@ -329,7 +329,7 @@ static void svc_event(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
 // 全局 GATT 回调转发
 // ---------------------------------------------------------------------------
 // 配置服务的 GATTS 事件在 esp_hid 的 "ble_hidd_events" 任务里回调,那个
-// 任务栈只有 4KB —— 建表链(尤其 v2 的 15 片属性表)在里面必然栈溢出
+// 任务栈只有 4KB —— 建表链(2300 字节配置要 15 片属性表)在里面必然栈溢出
 // (2026-10-06 真机踩坑,Stack protection fault 循环重启)。所以自家事件
 // 只拷贝参数入队,真正的处理放到本模块自己的大栈任务里,顺序不变。
 typedef struct {

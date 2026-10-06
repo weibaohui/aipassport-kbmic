@@ -18,12 +18,12 @@
 * 扫描并连上 `AI小键盘`,读出 2300 字节的配置(15 个 GATT 分片)并解析;
 * 列出所有模式、每个模式三个键(上 / 下 / OK)各自的动作;
 * 新增 / 删除 / 改名模式,切换当前模式;
-* 给任意一个键(短按 / 长按)设动作:可以用内置预设,也可以给自定义步骤序列;
+* 给任意一个键(短按 / 双击 / 长按)设动作:可以用内置预设,也可以给自定义步骤序列;
 * 恢复单个内置模式或整机的出厂默认;
 * 订阅设备事件(启动 / 配置已保存 / 按键),用于自动化验证。
 
-三个键:`Up` 上、`Down` 下、`OK` 确认。每个键有两个槽:`short-tap` 短按、
-`long-press` 长按。所以一个模式有 3 × 2 = 6 个可配的槽位,每个槽位是一个
+三个键:`Up` 上、`Down` 下、`OK` 确认。每个键有三个槽:`short-tap` 短按、
+`double-click` 双击、`long-press` 长按。所以一个模式有 3 × 3 = 9 个可配的槽位,每个槽位是一个
 最多 4 步的动作。
 
 ---
@@ -135,6 +135,7 @@ python3 -m unittest discover -s /Users/weibh/Desktop/aipassport-kbmic/mcp_server
 kbmic_list_devices()                                  # 先找到设备
 kbmic_list_modes()                                    # 现在每个键干什么
 kbmic_set_key(index=0, button="OK", slot="long-press", preset="Globe")
+kbmic_set_key(index=0, button="Down", slot="double-click", preset="Esc")
 kbmic_set_key(index=1, button="Up", slot="short-tap",
               trigger="click",
               steps=[{"kind": "key", "mods": "Ctrl+Shift", "keycode": 0x41}])

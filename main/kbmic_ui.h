@@ -4,7 +4,7 @@
 //   * 主页内容(home_build/home_poll):语音大块 + 状态行
 //   * 「键盘设置」导航子页(nav_*):模式列表/按键配置/动作选择三层,
 //     入口在框架设置菜单里(长按 OK 进菜单)
-// 按键事件经框架 home_key 回调进 main.c 的槽位执行器。
+// 按键事件经框架 full_key 回调进 main.c 的槽位执行器。
 #pragma once
 
 #include <stdbool.h>

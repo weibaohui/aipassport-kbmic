@@ -547,14 +547,14 @@ static int tool_wifi_remove(cJSON *args, appfw_mcp_resp_t *resp)
 }
 
 // 管理页(网页设置)按需开关:空闲堆紧张(httpd 要 ~10KB),不常驻。
-// start 只起 HTTP(设备保持在线,AP 不开);完整热点配网走设置菜单。
+// start 只起 HTTP(设备保持在线,AP 不开);无 Wi-Fi 时键盘配置走 BLE MCP。
 static int tool_web_start(cJSON *args, appfw_mcp_resp_t *resp)
 {
     (void)args;
     appfw_net_status_t st;
     appfw_net_get_status(&st);
     if (st.ip[0] == '\0') {
-        appfw_mcp_resp_addf(resp, "设备离线,网页不可用;请用设置菜单的『开启配网』配热点");
+        appfw_mcp_resp_addf(resp, "设备离线,网页不可用;键盘配置请继续使用 BLE MCP");
         return 1;
     }
     // 内存门槛:httpd 任务+控制块要 ~10KB。BLE+WiFi 共存下空闲堆紧张,

@@ -84,7 +84,7 @@ device's modes.
 | `kbmic_set_key` | **Core tool**: set the action for one (mode, button, slot) |
 | `kbmic_reset_mode` | Restore one built-in mode to factory defaults |
 | `kbmic_reset_device` | Factory-reset the device (4 built-in modes, active = 0) |
-| `kbmic_action_catalog` | List the 16 built-in action presets |
+| `kbmic_action_catalog` | List the 17 built-in action presets |
 | `kbmic_watch` | Subscribe to device events |
 
 Every tool returns a dict with an `ok` field; failures carry `error` text.
@@ -97,6 +97,7 @@ Examples:
 kbmic_list_devices()
 kbmic_list_modes()
 kbmic_set_key(index=0, button="OK", slot="long-press", preset="Globe")
+kbmic_set_key(index=0, button="Down", slot="double-click", preset="Esc")
 kbmic_set_key(index=1, button="Up", slot="short-tap", trigger="click",
               steps=[{"kind": "key", "mods": "Ctrl+Shift", "keycode": 0x41}])
 kbmic_add_mode(name="Meeting")
@@ -209,7 +210,7 @@ where `type` is 0=BOOT, 1=CONFIG_SAVED, 2=KEY (`aux` is the button index for KEY
 ```
 mcp_server/
 ├── protocol.py       wire format: constants, offsets, codec, validation, names, chunks, events
-├── catalog.py        16 built-in presets + factory defaults for the 4 built-in modes
+├── catalog.py        17 built-in presets + factory defaults for the 4 built-in modes
 ├── ble.py            BLE transport: scan, connect, chunked read/write, event subscription
 ├── server.py         MCP stdio server and its tools (touches no Bluetooth at import)
 ├── test_protocol.py  unit tests (stdlib unittest, no hardware needed)

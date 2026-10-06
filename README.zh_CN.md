@@ -4,263 +4,140 @@
 
 # AI小键盘(AI Passport 固件)
 
-把 [FoloToy AI Passport](https://github.com/FoloToy/ai-passport) 掌机(ESP32-C3,2.4″ ST7789 240×320,三键)变成一个**可自定义的蓝牙语音输入遥控器**:按住确定键,电脑/手机自己的语音输入就启动了,说完松开,文字直接落在光标处。
+把 [FoloToy AI Passport](https://github.com/FoloToy/ai-passport) 掌机(ESP32-C3、2.4″ 240×320 屏、三键、8 MB Flash、无 PSRAM)变成可配置的 BLE HID 键盘。当前默认键位为听写优化：长按上键向已连接的 Mac 按下 Apple Fn，松开结束；下键和 OK 键负责回车、取消、退格。
 
-蓝牙设备名固定为 **AI小键盘**。
+蓝牙设备名固定为 **AI小键盘**，不需要手机 App。
 
-基于 [aipassport-fw](https://github.com/weibaohui/aipassport-fw) 基础框架(以 git submodule 挂在 `components/framework`)开发,只用其中的 `bsp`(显示/LVGL、按键、电池),不引入 `appfw` 的联网链路。
+工程通过 git submodule 使用 [aipassport-fw](https://github.com/weibaohui/aipassport-fw)(挂在 `components/framework`)：BSP 负责 ADC 按键、显示、电量和 LVGL 锁;`appfw_ui` 负责设置壳层和完整按键生命周期;只有当已有保存的 Wi-Fi 且堆内存足够时，才可选启用 `appfw` 联网链路。
 
-## 为什么识别在电脑/手机而不在设备上
+## 为什么识别在主机侧
 
-ESP32-C3 只有 Bluetooth LE,没有经典蓝牙(BR/EDR),HFP 免提协议这条硬件路不存在;`SOC_BLE_ISO_SUPPORTED` 全系缺失,LE Audio 的 LC3 也用不上。**它做不了一个能被系统当作麦克风的蓝牙设备。**
+ESP32-C3 只有 Bluetooth LE，不能通过 HFP 或 LE Audio 被系统当作麦克风。设备因此以键盘身份工作：
 
-所以分工很干脆:
-
-| | 谁来做 |
+| 职责 | 执行位置 |
 | --- | --- |
-| 麦克风采集、语音识别、标点与候选词 | 电脑 / 手机自己的输入法 |
-| 触发语音输入、确认、删除、任意按键 | 本设备(BLE HID 键盘) |
-| 设备端录音与 ASR | 不参与 |
+| 麦克风采集、语音识别、标点、候选词 | 主机系统 / 输入法 |
+| 触发语音输入、回车、取消、退格、自定义快捷键 | 本设备(BLE HID 键盘) |
+| 设备端录音与 ASR | 不使用 |
 
-识别在本地跑,没有额外延迟,也**不需要 App、不需要联网、不需要账号**。
+正常听写路径不需要 App、账号或网络；可选的 Wi-Fi/HTTP 配置与按键功能彼此独立。
 
-## 键盘模式与按键定义
+## 默认键位
 
-设备带 **4 个内置模式 + 最多 4 个用户自定义模式**(上限 8)。每个模式里三个键都可自定义,每个键有两个槽:
-
-- **短按** —— 点一下触发,或按住触发(语音就是这么配的)
-- **长按** —— 按住超过 500 ms 触发
-
-> **为什么说话不在长按上**:说话=按住 OK,按多久说多久;BSP 的长按阈值
-> (500 ms)必然落在说话途中。所以出厂默认 OK 长按留空,"进设置"放在
-> 长按下键 —— 两者不打架。想改回来用 MCP `kbmic_set_key` 或网页。
-
-一个动作可以由**最多 4 步**组成,每步是一次带修饰键的敲击(`Ctrl+Win`)、一次 Consumer 用法(`Globe`),或一步延时。所以「回车回车回车」「Ctrl+Shift+A,等 80ms,再回车」这类组合都能配出来。
-
-### 内置模式
-
-**Mac**(用户定稿,2026-10-06 二改):
+内置 Mac / Windows / Android / iOS 四个档案，另可创建最多 4 个自定义档案。四个内置档案的默认物理键位完全一致：
 
 | 按键 | 动作 |
 | --- | --- |
-| **长按上键** | **按住 Fn/Globe 说话** —— 按住=Fn 按下,松开=Fn 抬起 |
-| **双击下键** | 发送 Esc |
-| 长按 OK | 进设置 |
-| 短按下键 | 回车 |
-| 短按 OK | 退格 |
-| 短按上键 / 长按下键 | 无(留空,可经 MCP/网页自行分配) |
+| 上键长按 | Apple Fn 按下；松开发送 Fn 抬起 |
+| 下键短按 | Enter |
+| 下键双击 | Escape |
+| OK 短按 | Backspace |
+| OK 长按 | 打开机身设置菜单 |
+| 上键短按/双击、下键长按、OK 双击 | 无动作 |
 
-其他三模式(通用键位):
+上键使用标准 8 字节键盘报告第 2 字节中的 Apple Top Case Fn usage。主机决定该键的系统行为；macOS 语音输入已实机验证。Windows/Android/iOS 的映射可能不同，每个档案仍可通过 MCP、HTTP 或机身 UI 单独修改。
 
-| 模式 | OK 短按(按住说话) | 上 / 下 |
-| --- | --- | --- |
-| **Windows** | `Ctrl+Win` | 回车 / 退格 |
-| **Android** | 长按空格 | 回车 / 退格 |
-| **iOS** | Globe(⚠️ 未实机验证) | 回车 / 退格 |
+## 配置模型
 
-通用键位:上键短按回车、长按连发三次;下键短按退格、长按进设置;OK 长按留空
-(说话=按住 OK,长按阈值会切断说话)。所有键位都可用 MCP / 网页 / 机身菜单改。
+- 协议版本：v3；NVS 中的 v2 数据可原地迁移。
+- 档案：4 个内置 + 最多 4 个自定义，上限 8 个。
+- 槽位：每个按键 3 个——短按、双击、长按。
+- 动作：最多 4 步。
+- 步骤类型：带修饰键的键盘键、Consumer Control usage、延时、Apple Fn。
+- 触发方式：none、click、tap/hold、long、double。
+- 存储：小端 packed 配置，持久化在 NVS。
 
-> Mac 走 Consumer `0x029D` 而**不**仿冒 Apple VID/PID —— 后者(把 6KRO 报告第 2 字节私有化成 `FF00h/03h`)是 QMK 的社区做法,实测有效,但涉及商标/MFi 风险,商业产品不建议。
->
-> Windows / Android 发的都是**普通组合键与按键**,快捷键仍可在宿主输入法里改成别的。微信的语音快捷键是可自定义的,所以不合适时不必回来改固件。
->
-> iOS 没有公开的第三方硬件键全局语音输入接口,这一档只是沿用 Globe 报文做尝试,通不通得实测。不通就用 MCP 改成别的组合键。
+C 与 Python 各自生成动作显示名，但必须逐字节一致；主机测试会检查这一点。
 
-## 界面
+## 设备界面
 
-五个页面,全用三个键操作。
+240×320 主页显示三张按键卡片、当前模式、BLE 连接状态、电量、说话/按住状态和最近一次按键反馈。
 
-**主页** —— 三行,每行一个键,右边显示它当前实际发送的东西:
+长按 OK 打开框架设置菜单，包含熄屏时间、亮度，以及「键盘快捷键」。键盘设置分三层：
 
-```
-┌────────────────────────────┐
-│ AI小键盘           ●已连接  │
-│  ┌──────────────────────┐  │
-│  │     按住 OK 说话      │  │   按住 OK 时整块变绿
-│  └──────────────────────┘  │
-│  模式 Mac         电量 87%  │
-│                            │
-│  上    Enter               │   ← 改配置后这里立刻跟着变
-│  下    Back                │
-│  OK    Globe (hold)        │
-│                            │
-│  长按下键:设置              │
-└────────────────────────────┘
-```
+1. **键盘模式**：选择档案，或新建自定义模式。
+2. **按键配置**：3 个按键 × 3 个槽。
+3. **选动作**：17 个内置预设，包括 Enter、Backspace、Tab、Space、Esc、Globe、Ctrl+Win、方向键、F1/F2、Enter ×3、设置、Apple Fn。
 
-**设置菜单**(**长按下键**进入):`键盘模式` / `按键配置` / `恢复默认` / `开启配网`。
+上下键移动光标，OK 选中。`< 返回` 行回到上一层，长按 OK 退出键盘设置视图。模式名支持中文，界面字体已包含常用汉字子集。
 
-**键盘模式**:列出全部模式,内置的标「内置」,自定义的标「自定义」,当前的在用的标「使用中」。OK 选中即切换并落盘。
+## 配置通道
 
-**按键配置**:6 行 = 3 个键 × 2 个槽,每行右侧是这个槽当前的动作名。
+### BLE GATT(主通道)
 
-**动作选择**:从 17 个内置预设里挑(回车、退格、Tab、空格、Esc、Globe、Ctrl+Win、方向键、F1/F2、回车×3、进设置…)。
+自定义 GATT 配置服务始终注册，可在桌面通过 `mcp_server/` 离线配置：
 
-导航约定:上下键移动光标,OK 选中,**长按 OK 返回**上一层。
-
-> 模式名支持中文(UTF-8 最多 15 字节),界面字体编进了《通用规范汉字表》一级字表的 3500 个常用字,所以自起的名字不会显示成方块。
-
-## 用 MCP 配置(推荐)
-
-设备有**两条 MCP 通道**,工具语义一致:
-
-1. **设备侧(推荐,联网后)** —— 固件内置 MCP 常驻服务,局域网直连,无需任何
-   宿主侧桥接。设备先配网(设置菜单 → 开启配网,手机连热点访问 192.168.4.1;
-   或已联网时 AI 调 `kbmic_web_start` 起管理页),然后:
-
-   ```
-   POST http://<设备IP>:8080/mcp      # 标准 JSON-RPC,单端点
-   ```
-
-   15 个工具:配置读写(`kbmic_get_config` / `kbmic_set_key` 支持 preset 或
-   自定义 steps:修饰键可用 "Ctrl+Shift" 字符串)、模式管理(增删改/激活/恢复
-   出厂)、`kbmic_simulate_key`(模拟触发物理键,等效真人按键)、
-   `kbmic_get_state`(模式/BLE/电量/WiFi)、热点增删查、以及框架内置的
-   `wifi_status` / `get_device_info` / `get_provisioning_status` /
-   `get_recent_logs`(诊断)。
-
-2. **BLE 桥(离线可用)** —— 设备暴露自定义 GATT 配置服务,Mac 上跑
-   [mcp_server/](mcp_server/) 的 MCP 服务端经蓝牙读写,不依赖网络。
-
-### 网页设置
-
-设备联网后,AI 调 `kbmic_web_start` 会返回管理页地址,浏览器打开页面下方有
-「键盘设置」卡片:切换生效模式、六个槽(3 键 × 短按/长按)从内置动作目录
-下拉选择写入。BLE+WiFi 共存下内存紧张,管理页按需起停(`kbmic_web_stop`
-释放);不稳定就重启设备再来。完整热点配网走机身:设置菜单 → 开启配网。
-
-### 配网流程
-
-1. 机身:长按下键进设置 → 选「开启配网」→ 设备切热点模式(断 WiFi);
-2. 手机连接设备热点,访问 `http://192.168.4.1`,选路由器热点、填密码、保存并连接;
-3. 设备自动回连并关闭热点,屏幕底注/`get_provisioning_status` 可查 IP。
-
-首次烧录后无热点配置时,设备会自动开启一次配网热点(之后全手动)。
-
-### BLE 桥的工具一览
-
-```
-kbmic_list_devices()                       # 找到设备
-kbmic_list_modes()                         # 现在每个键干什么
-kbmic_set_key(index=0, button="OK", slot="long-press", preset="Globe")
-kbmic_set_key(index=1, button="Up", slot="short-tap", trigger="click",
-              steps=[{"kind": "key", "mods": "Ctrl+Shift", "keycode": 0x41}])
-kbmic_add_mode(name="会议")
-kbmic_set_active_mode(index=4)
-kbmic_delete_mode(index=0)                 # 会被拒绝:内置模式
+```text
+Service        7d1c5a30-9f6e-4a21-8c3d-2b5e7a9f1c48
+Config chunks  7d1c5a40-… 到 7d1c5a4e-…，read/write
+Event          7d1c5a4f-…，read/notify
 ```
 
-设备端 MCP 工具(列模式、加删模式、改键、恢复出厂、订阅事件……),完整清单与注册方法见 [mcp_server/README.zh_CN.md](mcp_server/README.zh_CN.md)。
+整份配置 2300 字节：前 14 片各 160 字节，第 15 片 60 字节。客户端必须写完全部 15 片；设备校验完整配置后才提交并写入 NVS。
 
-<details>
-<summary>自己装一个</summary>
+安装并运行桌面 MCP 桥：
 
 ```bash
-cd ~/Desktop/aipassport-kbmic/mcp_server
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-python3 -m unittest discover -s . -v      # 62 个单测,不需要硬件
+cd mcp_server
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python -m unittest discover -s . -v
 ```
 
-MCP 客户端配置:
+把 MCP 客户端指向 `.venv/bin/python` 和 `server.py`。桥接服务支持设备发现、档案/按键编辑、模式管理、恢复出厂、动作目录和事件订阅。
 
-```json
-{ "mcpServers": { "kbmic": {
-  "command": "/Users/weibh/Desktop/aipassport-kbmic/mcp_server/.venv/bin/python",
-  "args": ["/Users/weibh/Desktop/aipassport-kbmic/mcp_server/server.py"] } } }
-```
+### Wi-Fi / HTTP(可选)
 
-</details>
+如果 NVS 中已有保存的 Wi-Fi，且 BLE/UI 启动后堆内存足够，固件会启动 Wi-Fi、设备侧 MCP 服务和 appfw portal 中的键盘设置卡片。没有已保存 Wi-Fi 时，固件刻意不打开 SoftAP；BLE 配置仍然可用。
 
-### 线协议要点
-
-```
-Service        7d1c5a30-9f6e-4a21-8c3d-2b5e7a9f1c48
-Config chunk 0 7d1c5a40-…  read / write     共 15 片,前 14 片 160 字节
-Config chunk 14 7d1c5a4e-… read / write     第 15 片 60 字节
-Event          7d1c5a4f-…  read / notify
-```
-
-整份配置 2300 字节,小端、packed、无对齐空洞。**分片是因为 IDF 5.5 的 GATT server 公开 API 里没有长读/长写入口**,与其依赖内部实现,不如用最普通的 read/write,跨 macOS/iOS/Android 都不踩协议栈差异。设备收齐 15 片并通过校验才提交落盘,所以不存在写了一半的中间状态;写完 MCP 会读回来比对。
+HTTP 端点支持读取/编辑按键槽、激活/新增/改名/删除模式，并与固件、桌面 MCP 使用同一个 17 项动作目录。
 
 ## 配对
 
-首次在系统蓝牙设置里选 **AI小键盘** 配对。本机没有输入数字键盘的能力,若主机要求输入配对码,固件会把码打到串口日志里。
+首次在系统蓝牙设置中选择 **AI小键盘** 配对。需要数字比对时，固件会自动确认并把配对码打印到串口日志。如果主机缓存了旧 HID report map，请先在主机侧忽略设备，或调用设备 BLE reset 后重新配对。
 
-## 烧录
+## 构建、测试与烧录
 
 ```bash
-cd ~/Desktop/aipassport-kbmic
-export IDF_PYTHON_ENV_PATH="$HOME/.espressif/python_env/idf5.5_py3.13_env"  # 非交互 shell 必须先指定
+./tools/validate.sh --static     # 仓库检查 + 框架/应用主机测试
+./tools/validate.sh --firmware   # 独立 ESP-IDF 构建 + 镜像校验
+./tools/validate.sh              # 全量门禁
+
+export IDF_PYTHON_ENV_PATH="$HOME/.espressif/python_env/idf5.5_py3.13_env"
 source ~/esp/esp-idf/export.sh
-idf.py build
-idf.py flash
+idf.py -p /dev/cu.usbmodem1101 flash
 ```
 
-门禁通过后 `build/firmware/<sha256>/` 保留带校验的归档,合并镜像在 `build/FoloToy-AI-Passport-full.bin`(整体从 `0x0` 写入,会重置 NVS 里的配置)。
-
-## 构建与测试
-
-```bash
-./tools/validate.sh              # 全量:静态检查 + host 测试 + 固件构建与校验
-./tools/validate.sh --static     # 只跑静态检查与 host 测试(不需要 ESP-IDF)
-./tools/validate.sh --firmware   # 只跑固件构建
-```
-
-测试分三层,各管一段:
-
-| 测试 | 守住什么 |
-| --- | --- |
-| `tests/test_kbmic_model.c` | 出厂默认、合法性、增删模式、**动作名渲染** |
-| `tests/test_ui_charset.py` | 界面里每个非 ASCII 字符都在字体子集内 |
-| `mcp_server/test_protocol.py` | 线协议编解码、校验、拒绝路径(62 个用例,不需要硬件) |
-
-其中动作名渲染两边各有一份实现(C 与 Python),必须逐字一致,否则同一件事在设备屏幕上和 MCP 返回值里显示成不同的名字 —— `test_kbmic_model.c` 就是为此存在的。
-
-改了界面文案后重新生成字体:
-
-```bash
-python3 tools/gen_font_charset.py
-npx lv_font_conv@1.5.3 --font assets/fonts/NotoSansSC-Regular.otf \
-  --size 16 --bpp 4 --format lvgl --no-compress \
-  --lv-font-name app_font_16 --lv-include lvgl.h \
-  --symbols "$(cat assets/fonts/kbmic_charset.txt)" \
-  --output assets/fonts/app_font_16.c
-```
-
-字体与资产约定见 [assets/README.zh_CN.md](assets/README.zh_CN.md)。
+全量门禁会在 `build/firmware/<sha256>/` 生成带校验的归档。要同时刷新 bootloader、分区表和 app，使用 `idf.py flash`，或从 `0x0` 写入生成的合并镜像。
 
 ## 目录
 
-```
+```text
 main/
-  main.c          启动装配、按键队列、五屏状态机
-  kbmic_config.h  配置模型与线协议结构体(纯 C,无 ESP-IDF 依赖)
-  kbmic_model.c   出厂默认、合法性、增删模式、动作名反推(可在主机上编译测试)
-  kbmic_store.c   NVS 持久化与生效副本
-  kbmic_action.c  动作执行器 + 17 个内置预设
-  kbmic_hid.c     BLE HID:两张 report map(键盘 + Consumer)、GAP 薄层、配对
-  kbmic_ble_svc.c 配置服务:分片读写、暂存校验、事件通知
-  kbmic_ui.c      五屏渲染
-assets/fonts/     3500 常用字表、源字库、生成字体、许可
-mcp_server/       MCP 服务端(协议 / 目录 / BLE / 工具 / 单测)
-tools/            门禁转发、符号表生成
-tests/            固件侧主机测试与字形覆盖门禁
+  main.c          启动、按键队列、appfw full_key 路由、可选网络启动
+  kbmic_config.h  packed v3 配置模型与 HID 常量
+  kbmic_model.c   默认值、合法性、迁移、档案操作、动作名
+  kbmic_store.c   NVS 读写与生效配置
+  kbmic_action.c  动作目录和 HID 动作执行
+  kbmic_hid.c     BLE HID、Apple Fn + Consumer 报告、配对/bond reset
+  kbmic_ble_svc.c 分片 GATT 配置服务与事件通知
+  kbmic_ui.c      主页与键盘设置视图
+  kbmic_mcp.c     可选设备侧 MCP 工具
+  kbmic_web.c     可选 HTTP 键盘设置 API
+assets/fonts/     中文字体子集与生成资产
+mcp_server/       桌面 BLE MCP 桥(协议、BLE 传输、工具、测试)
+tools/            门禁封装与字体工具
+tests/            主机测试、HID 描述符检查、UI 字形覆盖检查
+components/framework/  固定版本的 aipassport-fw BSP/appfw 子模块
 ```
 
-## 待实机验证
+## 实机验证
 
-编译通过、门禁全绿、协议两侧逐字节核对过,都不等于链路一定通。下面几点**必须在真机上验证**:
+2026-10-06 已实机验证：
 
-已验证(2026-10-06 真机):BLE 广播/配对/连接、设备侧 MCP 全部工具
-(配置读写/模式管理/模拟触发/热点管理)、网页管理页与键盘卡片、
-配网门户(热点模式)。
+- BLE 广播、配对和 HID 连接。
+- 上键长按按下 Apple Fn，松开释放 Fn。
+- 下键 Enter / Escape，OK Backspace，OK 长按进入设置。
+- 三键 ADC 事件、主页 UI 反馈、BLE GATT 配置服务就绪，以及 appfw `full_key` 生命周期路由。
 
-仍待验证:
-
-1. Mac 上按住确定键,微信电脑版的语音输入是否弹出(Consumer `0x029D` 方案 A)。
-2. Android 上 BLE 硬件键盘的长按空格能否送到微信输入法。
-3. iOS 那一档到底通不通。
-4. BLE 桥(mcp_server/)在真实 macOS CoreBluetooth 权限下的完整读写。
-
-若第 1 点不成立,退路是让用户把微信快捷键改成 `Ctrl+Option+V` 这类普通组合键 —— 固件已经支持任意组合,不需要重编。
+共享默认键位不承诺 Apple Fn 在 macOS 以外系统的行为。如果宿主输入法或系统需要其他快捷键，可单独编辑各档案。
