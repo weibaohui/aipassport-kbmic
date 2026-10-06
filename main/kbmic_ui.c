@@ -111,7 +111,7 @@ esp_err_t kbmic_ui_init(void)
     s_status = mk_label(s_scr, 144, UI_TITLE_Y + 2);
     style_text(s_status, UI_DIM);
 
-    // 语音面板:主页上的大圆角块。按住 OK 时整块变绿。
+    // 语音面板:主页上的大圆角块。按住"说话键"时整块变绿。
     s_hero = lv_obj_create(s_scr);
     lv_obj_set_size(s_hero, 216, UI_HERO_H);
     lv_obj_set_pos(s_hero, UI_PAD_X, UI_HERO_Y);
@@ -173,8 +173,13 @@ void kbmic_ui_render(const kbmic_ui_state_t *st)
             style_text(s_hero_text, lv_color_hex(0x06210F));
         } else {
             style_box(s_hero, UI_CARD, 14);
-            // 点明是哪个键:说话就是"按住 OK"(TAP 触发,按多久说多久)。
-            set_text(s_hero_text, st->voice_available ? "按住 OK 说话" : "按住 无动作");
+            // 点明是哪个键:说话槽在哪个键上由配置决定(Mac 默认在上键)。
+            if (st->voice_available) {
+                lv_label_set_text_fmt(s_hero_text, "按住%s 说话",
+                                      st->voice_btn ? st->voice_btn : "?");
+            } else {
+                set_text(s_hero_text, "按住 无动作");
+            }
             style_text(s_hero_text, st->voice_available ? UI_FG : UI_DIM);
         }
         s_last_voice = st->voice_active;

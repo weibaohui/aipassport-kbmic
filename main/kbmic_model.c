@@ -114,6 +114,20 @@ void kbmic_config_defaults(kbmic_config_t *cfg)
     cfg->profiles[0].builtin = 1;
     fill_common_slots(&cfg->profiles[0], step_consumer(KBMIC_HID_USAGE_GLOBE));
 
+    // Mac 键位(用户定稿 2026-10-06,与通用键位不同):
+    //   长按上键 = 按住 Fn/Globe 说话 —— 按住=Fn 按下,松开=Fn 抬起;
+    //   短按下键 = 回车;短按 OK = 退格;长按 OK = 进设置。
+    //   上键短按保留回车、下键长按保留进设置(用户未指定,沿用通用值)。
+    //   注意说话在上键、设置在 OK 长按:OK 短按是 CLICK 触发的退格,
+    //   按住超 500ms 走长按进设置,两种意图天然分开,不冲突。
+    cfg->profiles[0].slots[KBMIC_BTN_UP][KBMIC_SLOT_LONG] =
+        action_tap(step_consumer(KBMIC_HID_USAGE_GLOBE));
+    cfg->profiles[0].slots[KBMIC_BTN_DOWN][KBMIC_SLOT_TAP] =
+        action_click((kbmic_step_t[]){step_key(0, KBMIC_HID_KEY_ENTER)}, 1);
+    cfg->profiles[0].slots[KBMIC_BTN_OK][KBMIC_SLOT_TAP] =
+        action_click((kbmic_step_t[]){step_key(0, KBMIC_HID_KEY_BACKSPACE)}, 1);
+    cfg->profiles[0].slots[KBMIC_BTN_OK][KBMIC_SLOT_LONG] = action_settings();
+
     // --- Windows:微信电脑版按住 Ctrl+Win ---
     strcpy(cfg->profiles[1].name, "Windows");
     cfg->profiles[1].builtin = 1;

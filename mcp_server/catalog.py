@@ -205,13 +205,21 @@ def _default_builtin_profiles() -> list[Profile]:
         prof.set_slot(P.BTN_DOWN, P.SLOT_TAP, action_click(step_key(KEY_BACKSPACE)))
         prof.set_slot(P.BTN_DOWN, P.SLOT_LONG, action_settings())
         prof.set_slot(P.BTN_OK, P.SLOT_TAP, ok_tap)
-        # OK 长按留空:说话=按住 OK(按多久说多久),长按阈值必然落在说话途中,
-        # 长按槽再配设置会把说话切断。进设置默认在 长按下键(上行)。
+        # OK 长按留空(Mac 除外,见下):说话=按住某键,长按阈值必然落在
+        # 按住途中,长按槽再配 HID 动作会被松手切断。
         prof.set_slot(P.BTN_OK, P.SLOT_LONG, action_none())
         return prof
 
     mac = fill(Profile(name="Mac", builtin=1, slots=blank()),
                action_tap(step_consumer(USAGE_GLOBE)))
+    # Mac 键位(用户定稿 2026-10-06):
+    #   长按上键 = 按住 Fn/Globe 说话(按住=按下,松开=抬起);
+    #   短按下键 = 回车;短按 OK = 退格;长按 OK = 进设置。
+    #   上键短按保留回车、下键长按保留进设置。
+    mac.set_slot(P.BTN_UP, P.SLOT_LONG, action_tap(step_consumer(USAGE_GLOBE)))
+    mac.set_slot(P.BTN_DOWN, P.SLOT_TAP, action_click(step_key(KEY_ENTER)))
+    mac.set_slot(P.BTN_OK, P.SLOT_TAP, action_click(step_key(KEY_BACKSPACE)))
+    mac.set_slot(P.BTN_OK, P.SLOT_LONG, action_settings())
     windows = fill(Profile(name="Windows", builtin=1, slots=blank()),
                    action_tap(step_key(0, MOD_CTRL_GUI)))
     android = fill(Profile(name="Android", builtin=1, slots=blank()),

@@ -38,8 +38,9 @@ typedef struct {
     const char *mode_name;             // 主页右侧显示的当前模式名
     char title[KBMIC_UI_VALUE_MAX];
     char footer[KBMIC_UI_VALUE_MAX];   // 空串表示不显示底注
-    bool voice_active;                 // 主页:按住 OK 期间
-    bool voice_available;              // 主页:OK 短按槽配了真实动作(而非 Settings/无)
+    bool voice_active;                 // 主页:按住"说话键"期间
+    bool voice_available;              // 主页:存在"按住说话"槽(TAP 触发的语音键)
+    const char *voice_btn;             // 说话键显示名("上键"/"OK",main.c 静态串)
     kbmic_ui_line_t lines[KBMIC_UI_LINES_MAX];
     int line_count;
     int cursor;                        // 选中行,仅列表页有意义

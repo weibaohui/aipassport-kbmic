@@ -73,6 +73,16 @@ static const char *btn_name(int b)
     }
 }
 
+// 界面提示用的完整键名("上键"/"下键"/"OK")。
+static const char *btn_key_name(int b)
+{
+    switch (b) {
+    case KBMIC_BTN_UP:   return "上键";
+    case KBMIC_BTN_DOWN: return "下键";
+    default:             return "OK";
+    }
+}
+
 static const char *slot_name(int s)
 {
     return (s == KBMIC_SLOT_LONG) ? "长按" : "短按";
@@ -410,9 +420,32 @@ static void build_view(kbmic_ui_state_t *st)
     switch (s_view) {
     case ST_HOME: {
         set_title(st, "AI小键盘");
-        st->voice_active = s_held[KBMIC_BTN_OK];
-        const kbmic_action_t *ok = &cfg->profiles[cfg->active].slots[KBMIC_BTN_OK][KBMIC_SLOT_TAP];
-        st->voice_available = !kbmic_action_is_settings(ok) && ok->trigger == KBMIC_TRIG_TAP;
+
+        // 找"按住说话"的键:TAP 触发(按下即生效、松手收尾)且不是软件动作、
+        // 步骤里带 Consumer 用法(Globe 这类语音唤起键)的槽。键位由配置决定
+        // (Mac 默认在上键长按,Windows/Android/iOS 在 OK 短按)。
+        st->voice_available = false;
+        st->voice_btn = NULL;
+        st->voice_active = false;
+        for (int b = 0; b < KBMIC_BTN_COUNT && !st->voice_available; b++) {
+            for (int s = 0; s < KBMIC_SLOT_COUNT && !st->voice_available; s++) {
+                const kbmic_action_t *a =
+                    &cfg->profiles[cfg->active].slots[b][s];
+                if (a->trigger != KBMIC_TRIG_TAP || kbmic_action_is_settings(a)) {
+                    continue;
+                }
+                bool has_consumer = false;
+                for (int k = 0; k < a->step_count; k++) {
+                    if (a->steps[k].kind == KBMIC_STEP_CONSUMER) has_consumer = true;
+                }
+                if (!has_consumer) {
+                    continue;
+                }
+                st->voice_available = true;
+                st->voice_btn = btn_key_name(b);
+                st->voice_active = s_held[b];
+            }
+        }
 
         // 主页三行:每行一个键,右边是该键当前实际发送的东西。
         for (int b = 0; b < KBMIC_BTN_COUNT; b++) {
@@ -427,14 +460,14 @@ static void build_view(kbmic_ui_state_t *st)
         // 否则用户根本不知道还能这么进设置菜单。
         const kbmic_action_t *ok_long =
             &cfg->profiles[cfg->active].slots[KBMIC_BTN_OK][KBMIC_SLOT_LONG];
-        // 底注跟着实际配置走:说话=按住OK(主页大块已示意),设置提示取
-        // 真正配了"进设置"的那个长按槽 —— 默认在下键,OK 长按留给说话。
+        // 底注跟着实际配置走:设置提示优先 OK 长按(用户定稿的进设置方式),
+        // 其次下键长按。
         const kbmic_action_t *down_long =
             &cfg->profiles[cfg->active].slots[KBMIC_BTN_DOWN][KBMIC_SLOT_LONG];
-        if (kbmic_action_is_settings(down_long)) {
-            set_footer(st, "长按下键:设置");
-        } else if (kbmic_action_is_settings(ok_long)) {
+        if (kbmic_action_is_settings(ok_long)) {
             set_footer(st, "长按 OK 进入设置");
+        } else if (kbmic_action_is_settings(down_long)) {
+            set_footer(st, "长按下键:设置");
         } else {
             set_footer(st, "长按 OK: %s", kbmic_action_name(ok_long, name, sizeof(name)));
         }

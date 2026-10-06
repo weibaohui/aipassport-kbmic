@@ -263,13 +263,16 @@ class TestActionNames(unittest.TestCase):
     def test_names_of_all_builtin_default_slots(self):
         cfg = catalog.factory_default_config()
         expect = {
+            # Mac 键位(用户定稿):长按上键=按住Fn说话,短按下键=回车,
+            # 短按 OK=退格,长按 OK=进设置。
             (0, P.BTN_UP, P.SLOT_TAP): "Enter",
-            (0, P.BTN_UP, P.SLOT_LONG): "Enter Enter Enter",
-            (0, P.BTN_DOWN, P.SLOT_TAP): "Back",
+            (0, P.BTN_UP, P.SLOT_LONG): "Globe (hold)",
+            (0, P.BTN_DOWN, P.SLOT_TAP): "Enter",
             (0, P.BTN_DOWN, P.SLOT_LONG): "Settings",
-            (0, P.BTN_OK, P.SLOT_TAP): "Globe (hold)",
-            # OK 长按留空:说话=按住 OK,长按阈值不能把说话切断(进设置在下键长按)。
-            (0, P.BTN_OK, P.SLOT_LONG): "-",
+            (0, P.BTN_OK, P.SLOT_TAP): "Back",
+            (0, P.BTN_OK, P.SLOT_LONG): "Settings",
+            (1, P.BTN_DOWN, P.SLOT_TAP): "Back",
+            (1, P.BTN_OK, P.SLOT_LONG): "-",
             (1, P.BTN_OK, P.SLOT_TAP): "Ctrl+Win (hold)",
             (2, P.BTN_OK, P.SLOT_TAP): "Space (hold)",
             (3, P.BTN_OK, P.SLOT_TAP): "Globe (hold)",
