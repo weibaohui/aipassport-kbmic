@@ -6,7 +6,7 @@
 //   kbmic_hid   BLE HID 键盘 + Consumer 报告
 //   kbmic_ble_svc 配置服务:MCP 通过它读写上面那份配置
 //   kbmic_action 动作执行器:把配置里的一段 step 变成 HID 报告
-//   kbmic_ui    渲染;只认 kbmic_ui_state_t,不知道业务
+//   kbmic_ui    渲染(主页/键盘设置子页,挂在 appfw_ui 框架上)
 //
 // 并发模型:只有一条 app_task 改状态(按键事件、连接状态、电量),UI 重画也在
 // 同一条任务里持锁完成。状态与画面之间不存在第二份真相。LVGL 自己的渲染任务
@@ -19,6 +19,7 @@
 #include "bsp_display.h"
 #include "bsp_i2c.h"
 #include "appfw_mcp.h"
+#include "appfw_ui.h"
 #include "appfw_net.h"
 #include "appfw_netlist.h"
 #include "appfw_netlog.h"
@@ -45,25 +46,6 @@ static volatile bool s_keys_ready;
 // ---------------------------------------------------------------------------
 // 界面状态
 // ---------------------------------------------------------------------------
-typedef enum {
-    ST_HOME = 0,   // 主页:3 行,各显示一个键当前发什么
-    ST_MENU,       // 设置菜单
-    ST_MODES,      // 键盘模式选择
-    ST_KEYS,       // 按键配置:3 键 × 2 槽
-    ST_ACT,        // 某个槽的动作选择
-} view_t;
-
-// 设置菜单的条目数,要与 build_view() 里 ST_MENU 分支的顺序一致。
-#define MENU_ITEMS 4
-
-static view_t s_view = ST_HOME;
-static int s_cursor[ST_ACT];                 // 每个页面各自记住光标
-static uint8_t s_act_btn, s_act_slot;        // 动作选择页正在改哪一个槽
-static bool s_held[KBMIC_BTN_COUNT];         // 各键是否正按住(TAP 类动作)
-static bool s_in_long[KBMIC_BTN_COUNT];      // 已经走过长按阈值
-static int s_battery = -1;
-static bool s_connected;
-
 static const char *btn_name(int b)
 {
     switch (b) {
@@ -92,6 +74,11 @@ static const char *slot_name(int s)
     }
 }
 
+static bool s_held[KBMIC_BTN_COUNT];         // 各键是否正按住(TAP 类动作)
+static bool s_in_long[KBMIC_BTN_COUNT];      // 已经走过长按阈值
+static int s_battery = -1;
+static bool s_connected;
+
 // 当前生效模式的某个槽。BLE 配置在外部被改过之后,这里每次都重新取,
 // 不缓存 —— 缓存就会和 MCP 的写入打架。
 static const kbmic_action_t *slot_of(int btn, int slot)
@@ -103,19 +90,12 @@ static const kbmic_action_t *slot_of(int btn, int slot)
 // ---------------------------------------------------------------------------
 // 按键执行
 // ---------------------------------------------------------------------------
-static void enter_settings(void)
-{
-    s_view = ST_MENU;
-    s_cursor[ST_MENU] = 0;
-}
-
 static void run_slot(int btn, int slot)
 {
     const kbmic_action_t *a = slot_of(btn, slot);
-    if (kbmic_action_is_settings(a)) {
-        enter_settings();
-        return;
-    }
+    // "进设置"只在主页长按路径生效(home_key 返回 APPFW_KEY_MENU);
+    // 其余路径遇到该动作按无操作处理。
+    if (kbmic_action_is_settings(a)) return;
     const esp_err_t ret = kbmic_action_run(a);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "执行动作失败: %s", esp_err_to_name(ret));
@@ -198,36 +178,7 @@ static void on_key_home(int btn, bsp_btn_ev_t ev)
     }
 }
 
-static void go_back(void)
-{
-    switch (s_view) {
-    case ST_ACT:  s_view = ST_KEYS;  break;
-    case ST_KEYS: s_view = ST_MENU;  break;
-    case ST_MODES:s_view = ST_MENU;  break;
-    case ST_MENU: s_view = ST_HOME;  break;
-    default:      s_view = ST_HOME;  break;
-    }
-}
-
 static void activate(void);
-
-static void on_key_menu(int ev_btn, bsp_btn_ev_t ev)
-{
-    if (ev == BSP_BTN_LONG && ev_btn == KBMIC_BTN_OK) {
-        go_back();
-        return;
-    }
-    if (ev != BSP_BTN_CLICK) {
-        return;   // 菜单里不响应双击;长按非 OK 键也只当没按
-    }
-    if (ev_btn == KBMIC_BTN_UP) {
-        s_cursor[ST_MENU] = (s_cursor[ST_MENU] + MENU_ITEMS - 1) % MENU_ITEMS;
-    } else if (ev_btn == KBMIC_BTN_DOWN) {
-        s_cursor[ST_MENU] = (s_cursor[ST_MENU] + 1) % MENU_ITEMS;
-    } else if (ev_btn == KBMIC_BTN_OK) {
-        activate();
-    }
-}
 
 // 模式列表:上下移动,OK 选中并切过去,长按返回。列表末尾还有一行动态的
 // "＋ 新建模式"(模式未满时),OK 即创建一个自定义模式并选中它 —— 不用
@@ -238,330 +189,11 @@ static int modes_rows(void)
     return (n < KBMIC_MAX_PROFILES) ? n + 1 : n;
 }
 
-static void on_key_modes(int btn, bsp_btn_ev_t ev)
-{
-    kbmic_config_t work = *kbmic_config_current();
-    const int n = work.count;
-    const int rows = modes_rows();
-    if (rows <= 0) {
-        return;
-    }
-
-    if (ev == BSP_BTN_LONG && btn == KBMIC_BTN_OK) {
-        go_back();
-        return;
-    }
-    if (ev != BSP_BTN_CLICK) {
-        return;
-    }
-
-    if (btn == KBMIC_BTN_UP) {
-        s_cursor[ST_MODES] = (s_cursor[ST_MODES] + rows - 1) % rows;
-    } else if (btn == KBMIC_BTN_DOWN) {
-        s_cursor[ST_MODES] = (s_cursor[ST_MODES] + 1) % rows;
-    } else if (btn == KBMIC_BTN_OK) {
-        if (s_cursor[ST_MODES] >= n) {          // "＋ 新建模式" 行
-            char name[KBMIC_NAME_MAX];
-            snprintf(name, sizeof(name), "自定义%d",
-                     n - KBMIC_BUILTIN_MODES + 1);
-            const int idx = kbmic_config_add_profile(&work, name);
-            if (idx < 0) {
-                ESP_LOGW(TAG, "新建模式失败:已满");
-                return;
-            }
-            work.active = (uint8_t)idx;
-            kbmic_config_commit(&work);
-            s_cursor[ST_MODES] = idx;           // 停在新行上,顺手进按键配置
-            ESP_LOGI(TAG, "新建模式 %s(#%d)", name, idx);
-        } else {
-            work.active = (uint8_t)s_cursor[ST_MODES];
-            kbmic_config_commit(&work);
-            s_view = ST_HOME;
-            ESP_LOGI(TAG, "切换到模式 %s", work.profiles[work.active].name);
-        }
-    }
-}
-
 // 按键配置:6 行(3 键 × 2 槽),OK 进入该槽的动作选择,长按返回。
-static void on_key_keys(int btn, bsp_btn_ev_t ev)
-{
-    const int rows = KBMIC_BTN_COUNT * KBMIC_SLOT_COUNT;
-    if (ev == BSP_BTN_LONG && btn == KBMIC_BTN_OK) {
-        go_back();
-        return;
-    }
-    if (ev != BSP_BTN_CLICK) {
-        return;
-    }
-    if (btn == KBMIC_BTN_UP) {
-        s_cursor[ST_KEYS] = (s_cursor[ST_KEYS] + rows - 1) % rows;
-    } else if (btn == KBMIC_BTN_DOWN) {
-        s_cursor[ST_KEYS] = (s_cursor[ST_KEYS] + 1) % rows;
-    } else if (btn == KBMIC_BTN_OK) {
-        s_act_btn = (uint8_t)(s_cursor[ST_KEYS] / KBMIC_SLOT_COUNT);
-        s_act_slot = (uint8_t)(s_cursor[ST_KEYS] % KBMIC_SLOT_COUNT);
-        s_cursor[ST_ACT] = 0;
-        s_view = ST_ACT;
-    }
-}
-
 // 动作选择:上下选,OK 写入,长按返回。
-static void on_key_act(int btn, bsp_btn_ev_t ev)
-{
-    const int n = kbmic_catalog_count();
-    if (ev == BSP_BTN_LONG && btn == KBMIC_BTN_OK) {
-        go_back();
-        return;
-    }
-    if (ev != BSP_BTN_CLICK) {
-        return;
-    }
-    if (btn == KBMIC_BTN_UP) {
-        s_cursor[ST_ACT] = (s_cursor[ST_ACT] + n - 1) % n;
-    } else if (btn == KBMIC_BTN_DOWN) {
-        s_cursor[ST_ACT] = (s_cursor[ST_ACT] + 1) % n;
-    } else if (btn == KBMIC_BTN_OK) {
-        kbmic_config_t work = *kbmic_config_current();
-        kbmic_action_t a = kbmic_catalog_get((uint8_t)s_cursor[ST_ACT])->action;
-        // 动作选择页按的是"某一个槽"。目录里的动作自带触发语义(Enter 是点一下、
-        // Globe 是按住),但长按槽必须一直是长按触发,否则 500ms 之后没人收尾,
-        // 按住不放会一直重复发。
-        if (s_act_slot == KBMIC_SLOT_LONG) {
-            a.trigger = KBMIC_TRIG_LONG;
-        }
-        work.profiles[work.active].slots[s_act_btn][s_act_slot] = a;
-        kbmic_config_commit(&work);
-        s_view = ST_KEYS;
-    }
-}
-
-static void activate(void)
-{
-    switch (s_cursor[ST_MENU]) {
-    case 0:
-        s_view = ST_MODES;
-        s_cursor[ST_MODES] = kbmic_config_current()->active;
-        break;
-    case 1:
-        s_view = ST_KEYS;
-        s_cursor[ST_KEYS] = 0;
-        break;
-    case 2: {
-        // 恢复默认:只对内置模式有意义,自定义模式没有"出厂值"可回。
-        kbmic_config_t work = *kbmic_config_current();
-        if (work.active < KBMIC_BUILTIN_MODES) {
-            kbmic_config_reset_profile(&work, work.active);
-            kbmic_config_commit(&work);
-            ESP_LOGI(TAG, "模式 %s 已恢复默认", work.profiles[work.active].name);
-        } else {
-            ESP_LOGW(TAG, "自定义模式没有出厂默认,未改动");
-        }
-        break;
-    }
-    case 3:
-        // 开启配网:WiFi 切热点模式(断 STA),手机连上访问 192.168.4.1。
-        // 门户里点"保存并连接"后由框架自动关热点回 STA(与收音机同款模型)。
-        ESP_LOGI(TAG, "开启配网门户(菜单项)");
-        appfw_net_start_portal();
-        break;
-    default:
-        break;
-    }
-}
-
-static void handle_key(int btn, bsp_btn_ev_t ev)
-{
-    // 按键诊断:键盘应用事件频率是人手速,INFO 级不构成刷屏。
-    // 真机排障(如"长按无反应")时先看这条有没有出,再谈状态机。
-    ESP_LOGI(TAG, "按键 %s 事件%d @视图%d", btn_name(btn), (int)ev, (int)s_view);
-
-    // 长按(进菜单/返回/触发动作)之后的松手 CLICK,对新视图是"误触":
-    // 不吞掉的话,长按 OK 进菜单的瞬间会被松手直接"确认"成第一项
-    // (2026-10-06 真机踩坑)。HOME 自己用 s_in_long 区分归属,不在这处理。
-    if (ev == BSP_BTN_CLICK && s_view != ST_HOME && s_in_long[btn]) {
-        s_in_long[btn] = false;
-        return;
-    }
-
-    switch (s_view) {
-    case ST_HOME: on_key_home(btn, ev); break;
-    case ST_MENU: on_key_menu(btn, ev); break;
-    case ST_MODES: on_key_modes(btn, ev); break;
-    case ST_KEYS: on_key_keys(btn, ev); break;
-    case ST_ACT: on_key_act(btn, ev); break;
-    default: break;
-    }
-}
-
 // ---------------------------------------------------------------------------
 // 界面数据
 // ---------------------------------------------------------------------------
-static void set_title(kbmic_ui_state_t *st, const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(st->title, sizeof(st->title), fmt, ap);
-    va_end(ap);
-}
-
-static void set_footer(kbmic_ui_state_t *st, const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(st->footer, sizeof(st->footer), fmt, ap);
-    va_end(ap);
-}
-
-static void set_line(kbmic_ui_state_t *st, int i, const char *label, const char *value)
-{
-    if (i < 0 || i >= KBMIC_UI_LINES_MAX) {
-        return;
-    }
-    snprintf(st->lines[i].label, KBMIC_UI_LABEL_MAX, "%s", label);
-    snprintf(st->lines[i].value, KBMIC_UI_VALUE_MAX, "%s", value ? value : "-");
-}
-
-static void build_view(kbmic_ui_state_t *st)
-{
-    const kbmic_config_t *cfg = kbmic_config_current();
-    char name[KBMIC_ACTION_NAME_MAX];
-    char buf[KBMIC_UI_VALUE_MAX];
-
-    st->view = (kbmic_view_t)s_view;
-    st->connected = s_connected;
-    st->battery = s_battery;
-    st->mode_name = cfg->profiles[cfg->active].name;
-    st->line_count = 0;
-    st->cursor = s_cursor[s_view];
-    st->show_cursor = (s_view != ST_HOME);
-    st->title[0] = '\0';
-    st->footer[0] = '\0';
-    st->voice_available = false;
-
-    switch (s_view) {
-    case ST_HOME: {
-        set_title(st, "AI小键盘");
-
-        // 找"按住说话"的键:TAP 触发(按下即生效、松手收尾)且不是软件动作、
-        // 步骤里带 Consumer 用法(Globe 这类语音唤起键)的槽。键位由配置决定
-        // (Mac 默认在上键长按,Windows/Android/iOS 在 OK 短按)。
-        st->voice_available = false;
-        st->voice_btn = NULL;
-        st->voice_active = false;
-        for (int b = 0; b < KBMIC_BTN_COUNT && !st->voice_available; b++) {
-            for (int s = 0; s < KBMIC_SLOT_COUNT && !st->voice_available; s++) {
-                const kbmic_action_t *a =
-                    &cfg->profiles[cfg->active].slots[b][s];
-                if (a->trigger != KBMIC_TRIG_TAP || kbmic_action_is_settings(a)) {
-                    continue;
-                }
-                bool has_consumer = false;
-                for (int k = 0; k < a->step_count; k++) {
-                    if (a->steps[k].kind == KBMIC_STEP_CONSUMER) has_consumer = true;
-                }
-                if (!has_consumer) {
-                    continue;
-                }
-                st->voice_available = true;
-                st->voice_btn = btn_key_name(b);
-                st->voice_active = s_held[b];
-            }
-        }
-
-        // 主页三行:每行一个键,右边是该键当前实际发送的东西。
-        for (int b = 0; b < KBMIC_BTN_COUNT; b++) {
-            kbmic_action_name(&cfg->profiles[cfg->active].slots[b][KBMIC_SLOT_TAP],
-                              name, sizeof(name));
-            set_line(st, b, btn_name(b), name);
-        }
-        st->line_count = KBMIC_BTN_COUNT;
-        st->show_cursor = false;
-
-        // OK 的长按槽若被配成了"进设置",主页就把这条提示写出来;
-        // 否则用户根本不知道还能这么进设置菜单。
-        const kbmic_action_t *ok_long =
-            &cfg->profiles[cfg->active].slots[KBMIC_BTN_OK][KBMIC_SLOT_LONG];
-        // 底注跟着实际配置走:设置提示优先 OK 长按(用户定稿的进设置方式),
-        // 其次下键长按。
-        const kbmic_action_t *down_long =
-            &cfg->profiles[cfg->active].slots[KBMIC_BTN_DOWN][KBMIC_SLOT_LONG];
-        if (kbmic_action_is_settings(ok_long)) {
-            set_footer(st, "长按 OK 进入设置");
-        } else if (kbmic_action_is_settings(down_long)) {
-            set_footer(st, "长按下键:设置");
-        } else {
-            set_footer(st, "长按 OK: %s", kbmic_action_name(ok_long, name, sizeof(name)));
-        }
-
-        // 配网热点开着时,主页底注让出位置给配网指引(存着配置也允许手动开)。
-        appfw_net_status_t st_net;
-        appfw_net_get_status(&st_net);
-        if (st_net.portal_active) {
-            set_footer(st, "配网中:连 %s 访问 192.168.4.1", st_net.ap_ssid);
-        }
-        break;
-    }
-
-    case ST_MENU: {
-        set_title(st, "设置");
-        static const char *items[MENU_ITEMS] = {"键盘模式", "按键配置", "恢复默认", "开启配网"};
-        for (int i = 0; i < MENU_ITEMS; i++) {
-            set_line(st, i, items[i],
-                     i == 0 ? "" : (i == 2 ? "仅内置" : (i == 3 ? "连手机配" : "")));
-        }
-        st->line_count = MENU_ITEMS;
-        set_footer(st, "OK 选中   长按 OK 返回");
-        break;
-    }
-
-    case ST_MODES: {
-        const int rows = modes_rows();
-        set_title(st, "键盘模式 %d/%d", s_cursor[ST_MODES] + 1, rows);
-        for (uint8_t i = 0; i < cfg->count && i < KBMIC_UI_LINES_MAX; i++) {
-            set_line(st, i, cfg->profiles[i].name, i == cfg->active ? "使用中" : (cfg->profiles[i].builtin ? "内置" : "自定义"));
-        }
-        st->line_count = cfg->count;
-        if (rows > cfg->count) {              // 模式未满:末尾一行"＋ 新建模式"
-            set_line(st, cfg->count, "＋ 新建模式", "");
-            st->line_count = cfg->count + 1;
-        }
-        set_footer(st, "OK 选用/新建   长按 OK 返回");
-        break;
-    }
-
-    case ST_KEYS: {
-        set_title(st, "按键配置");
-        st->mode_name = cfg->profiles[cfg->active].name;
-        int row = 0;
-        for (int b = 0; b < KBMIC_BTN_COUNT; b++) {
-            for (int s = 0; s < KBMIC_SLOT_COUNT; s++) {
-                kbmic_action_name(&cfg->profiles[cfg->active].slots[b][s], name, sizeof(name));
-                snprintf(buf, sizeof(buf), "%s/%s", btn_name(b), slot_name(s));
-                set_line(st, row++, buf, name);
-            }
-        }
-        st->line_count = row;
-        set_footer(st, "OK 更改   长按 OK 返回");
-        break;
-    }
-
-    case ST_ACT: {
-        set_title(st, "%s/%s 选动作", btn_name(s_act_btn), slot_name(s_act_slot));
-        const int n = kbmic_catalog_count();
-        for (int i = 0; i < n && i < KBMIC_UI_LINES_MAX; i++) {
-            set_line(st, i, kbmic_catalog_get((uint8_t)i)->name, "");
-        }
-        st->line_count = n < KBMIC_UI_LINES_MAX ? n : KBMIC_UI_LINES_MAX;
-        set_footer(st, "OK 选定   长按 OK 返回");
-        break;
-    }
-
-    default:
-        set_title(st, "?");
-        break;
-    }
-}
-
 // ---------------------------------------------------------------------------
 // BSP 按键回调
 //
@@ -585,14 +217,7 @@ static void on_key_from_bsp(bsp_btn_t btn, bsp_btn_ev_t ev, void *user)
 // ---------------------------------------------------------------------------
 static void on_config_changed(void)
 {
-    // 配置可能来自 MCP,把游标夹回合法范围,免得 MCP 删掉模式后光标停在越界行上。
-    const kbmic_config_t *cfg = kbmic_config_current();
-    if (s_cursor[ST_MODES] >= cfg->count) {
-        s_cursor[ST_MODES] = cfg->count ? cfg->count - 1 : 0;
-    }
-    if (s_cursor[ST_MODES] < 0) {
-        s_cursor[ST_MODES] = 0;
-    }
+    ESP_LOGI(TAG, "配置已更新(模式数 %u)", kbmic_config_current()->count);
 }
 
 static void app_task(void *arg)
@@ -603,7 +228,7 @@ static void app_task(void *arg)
 
     for (;;) {
         while (s_key_queue && xQueueReceive(s_key_queue, &msg, 0) == pdTRUE) {
-            handle_key(msg & 0xF, (bsp_btn_ev_t)((msg >> 4) & 0xF));
+            appfw_ui_on_key(msg & 0xF, (msg >> 4) & 0xF);   // 框架统一入口
         }
 
         s_connected = kbmic_hid_connected();
@@ -618,16 +243,114 @@ static void app_task(void *arg)
             }
         }
 
-        kbmic_ui_state_t st;
-        build_view(&st);
-        if (bsp_lvgl_lock(200)) {
-            kbmic_ui_render(&st);
-            bsp_lvgl_unlock();
-        }
-
         vTaskDelay(pdMS_TO_TICKS(100));   // 10 fps
     }
 }
+
+// ---------------------------------------------------------------------------
+// 主页按键(appfw home_key 回调,锁外执行):按当前模式执行槽位动作。
+// 长按 OK 若配了"进设置"返回 APPFW_KEY_MENU(打开框架设置菜单 —— WiFi
+// 管理/设备信息/配网/AI 管理与"键盘设置"入口都在那里)。
+// ---------------------------------------------------------------------------
+static appfw_key_action_t kbmic_home_key(int btn, int ev)
+{
+    ESP_LOGI(TAG, "按键 %s 事件%d", btn_name(btn), ev);
+    if (btn < 0 || btn >= KBMIC_BTN_COUNT) return APPFW_KEY_CONSUMED;
+
+    const kbmic_action_t *tap_slot = slot_of(btn, KBMIC_SLOT_TAP);
+    const kbmic_action_t *dbl_slot = slot_of(btn, KBMIC_SLOT_DOUBLE);
+    const kbmic_action_t *long_slot = slot_of(btn, KBMIC_SLOT_LONG);
+
+    switch ((bsp_btn_ev_t)ev) {
+    case BSP_BTN_PRESS:
+        s_in_long[btn] = false;
+        if (tap_slot->trigger == KBMIC_TRIG_TAP) {
+            run_slot(btn, KBMIC_SLOT_TAP);
+            s_held[btn] = true;
+        }
+        break;
+
+    case BSP_BTN_CLICK:
+        if (s_held[btn]) {
+            s_held[btn] = false;
+            kbmic_action_release();
+        } else if (!s_in_long[btn] && tap_slot->trigger == KBMIC_TRIG_CLICK) {
+            run_slot(btn, KBMIC_SLOT_TAP);
+        }
+        break;
+
+    case BSP_BTN_DOUBLE:
+        if (dbl_slot->trigger == KBMIC_TRIG_DOUBLE) {
+            run_slot(btn, KBMIC_SLOT_DOUBLE);
+        }
+        break;
+
+    case BSP_BTN_LONG: {
+        s_in_long[btn] = true;
+        const bool long_active = (long_slot->trigger != KBMIC_TRIG_NONE) ||
+                                 kbmic_action_is_settings(long_slot);
+        // 长按槽真有动作才打断按住中的 TAP(说话);槽空则说话持续。
+        if (long_active && s_held[btn]) {
+            s_held[btn] = false;
+            kbmic_action_release();
+        }
+        if (long_active) {
+            if (kbmic_action_is_settings(long_slot)) return APPFW_KEY_MENU;
+            if (long_slot->trigger == KBMIC_TRIG_TAP) {
+                run_slot(btn, KBMIC_SLOT_LONG);
+                s_held[btn] = true;
+            } else {
+                run_slot(btn, KBMIC_SLOT_LONG);
+            }
+        }
+        break;
+    }
+
+    case BSP_BTN_LONG_UP:
+        // 长按后的松开:按住类动作(说话)的正式收尾
+        if (s_held[btn]) {
+            s_held[btn] = false;
+            kbmic_action_release();
+        }
+        break;
+
+    default:
+        break;
+    }
+
+    // 说话状态给主页大块显示:找按住中的键(TAP 触发、非软件动作)
+    const kbmic_config_t *cfg = kbmic_config_current();
+    const char *voice_btn = NULL;
+    bool active = false;
+    for (int b = 0; b < KBMIC_BTN_COUNT && !voice_btn; b++) {
+        for (int s = 0; s < KBMIC_SLOT_COUNT && !voice_btn; s++) {
+            const kbmic_action_t *a = &cfg->profiles[cfg->active].slots[b][s];
+            if (a->trigger != KBMIC_TRIG_TAP || kbmic_action_is_settings(a)) continue;
+            bool has_consumer = false, has_fn = false;
+            for (int k = 0; k < a->step_count; k++) {
+                if (a->steps[k].kind == KBMIC_STEP_CONSUMER) has_consumer = true;
+                if (a->steps[k].kind == KBMIC_STEP_APPLEFN) has_fn = true;
+            }
+            if (has_consumer || has_fn) {
+                voice_btn = btn_key_name(b);
+                active = s_held[b];
+            }
+        }
+    }
+    kbmic_ui_set_voice(active, voice_btn);
+    return APPFW_KEY_CONSUMED;
+}
+
+// ---------------------------------------------------------------------------
+// 键盘设置导航子页(框架菜单入口)
+// ---------------------------------------------------------------------------
+static const appfw_menu_nav_t k_navs[] = {{
+    .label = "键盘设置",
+    .enter = kbmic_nav_enter,
+    .build = kbmic_nav_build,
+    .poll  = kbmic_nav_poll,
+    .key   = kbmic_nav_key,
+}};
 
 // ---------------------------------------------------------------------------
 // MCP 模拟触发回调
@@ -714,7 +437,23 @@ void app_main(void)
     kbmic_mcp_set_simulate(simulate_inject);
     kbmic_mcp_init();
 
-    kbmic_ui_init();   // 内部自行加解锁,调用方不要再套一层
+    // 界面:框架 appfw_ui(主页+设置菜单+键盘设置子页)。
+    // 长按 OK 配的"进设置"在 home_key 里返回 APPFW_KEY_MENU 打开框架菜单。
+    const appfw_ui_cfg_t ucfg = {
+        .home_title = "AI小键盘",
+        .home_build = kbmic_home_build,
+        .home_poll  = kbmic_home_poll,
+        .home_key   = kbmic_home_key,
+        // 框架设置菜单:WiFi 管理/设备信息/配网/AI 管理/亮度(刷新周期无意义)
+        .menu_show_mask = APPFW_MENU_ITEM_ALL & ~APPFW_MENU_ITEM_REFRESH_PERIOD,
+        .menu_navs = k_navs,
+        .menu_navs_count = 1,
+        .menu_open_btn = 0xFF,   // 主页按键全被 home_key 接管
+    };
+    if (bsp_lvgl_lock(1000)) {
+        appfw_ui_init(&ucfg);
+        bsp_lvgl_unlock();
+    }
 
     s_key_queue = xQueueCreate(16, sizeof(int));
     if (!s_key_queue ||
