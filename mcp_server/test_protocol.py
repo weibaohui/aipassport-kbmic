@@ -3,7 +3,7 @@
     python3 -m unittest discover -s /Users/weibh/Desktop/aipassport-kbmic/mcp_server -v
 
 覆盖:
-  * blob 编解码后正好 1580 字节,且 encode(decode(x)) == x(字节级往返)
+  * blob 编解码后正好 2300 字节,且 encode(decode(x)) == x(字节级往返)
   * 出厂默认配置的往返
   * 动作显示名的各种边角情况(Ctrl+Win / Globe / 多步 / TAP 后缀 / "-")
   * 越界索引、删除内置模式、名字超长、步数超限等拒绝路径
@@ -46,18 +46,18 @@ from protocol import (  # noqa: E402
 
 class TestLayout(unittest.TestCase):
     def test_sizes_match_firmware(self):
-        self.assertEqual(P.CONFIG_SIZE, 1580)
-        self.assertEqual(P.PROFILE_SIZE, 197)
+        self.assertEqual(P.CONFIG_SIZE, 2300)
+        self.assertEqual(P.PROFILE_SIZE, 287)
         self.assertEqual(P.ACTION_SIZE, 30)
         self.assertEqual(P.STEP_SIZE, 7)
-        self.assertEqual(P.CHUNK_COUNT, 10)
+        self.assertEqual(P.CHUNK_COUNT, 15)
         self.assertEqual(P.CHUNK_SIZE, 160)
-        self.assertEqual(P.chunk_expected_len(9), 140)
+        self.assertEqual(P.chunk_expected_len(14), 60)
 
     def test_absolute_step_offset(self):
-        # 题面给的算式:4 + 197*b_index + 17 + (b*2+s)*30 + 2 + i*7
+        # 题面给的算式:4 + 287*b_index + 17 + (b*3+s)*30 + 2 + i*7
         for b_index, b, s, i in ((0, 0, 0, 0), (3, 2, 1, 2), (7, 1, 0, 3)):
-            expected = 4 + 197 * b_index + 17 + (b * 2 + s) * 30 + 2 + i * 7
+            expected = 4 + 287 * b_index + 17 + (b * 3 + s) * 30 + 2 + i * 7
             self.assertEqual(P.step_offset(b_index, b, s, i), expected)
 
     def test_uuid_scheme(self):
@@ -71,10 +71,10 @@ class TestLayout(unittest.TestCase):
         uuids = [P.SERVICE_UUID, P.EVENT_UUID] + [P.chunk_uuid(i) for i in range(P.CHUNK_COUNT)]
         self.assertEqual(len(set(uuids)), len(uuids))
 
-    def test_self_check_reports_1580(self):
+    def test_self_check_reports_size(self):
         report = P.self_check()
-        self.assertEqual(report["config_size"], 1580)
-        self.assertEqual(report["default_bytes"], 1580)
+        self.assertEqual(report["config_size"], 2300)
+        self.assertEqual(report["default_bytes"], 2300)
 
 
 # ---------------------------------------------------------------------------
@@ -82,15 +82,15 @@ class TestLayout(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestRoundTrip(unittest.TestCase):
-    def test_factory_default_is_1580(self):
+    def test_factory_default_is_size(self):
         blob = catalog.factory_default_config().encode()
         self.assertIsInstance(blob, bytes)
-        self.assertEqual(len(blob), 1580)
+        self.assertEqual(len(blob), 2300)
 
-    def test_encode_decode_is_1580(self):
+    def test_encode_decode_is_size(self):
         cfg = catalog.factory_default_config()
         decoded = Config.decode(cfg.encode())
-        self.assertEqual(len(decoded.encode()), 1580)
+        self.assertEqual(len(decoded.encode()), 2300)
 
     def test_encode_of_decode_equals_original(self):
         blob = catalog.factory_default_config().encode()
@@ -103,7 +103,7 @@ class TestRoundTrip(unittest.TestCase):
         cfg.add_profile("我的语音")
         cfg.set_active(4)
         blob = cfg.encode()
-        self.assertEqual(len(blob), 1580)
+        self.assertEqual(len(blob), 2300)
         back = Config.decode(blob)
         self.assertEqual(back.encode(), blob)
         self.assertEqual(back.count, 5)
@@ -117,7 +117,7 @@ class TestRoundTrip(unittest.TestCase):
     def test_header_fields(self):
         cfg = catalog.factory_default_config()
         blob = cfg.encode()
-        self.assertEqual(blob[0], 1, "version 必须是 1")
+        self.assertEqual(blob[0], 2, "version 必须是 2")
         self.assertEqual(blob[1], 0, "active 必须是 0")
         self.assertEqual(blob[2], 4, "出厂配置 4 个模式")
         self.assertEqual(blob[3], 0, "reserved")
@@ -126,8 +126,8 @@ class TestRoundTrip(unittest.TestCase):
         blob = catalog.factory_default_config().encode()
         # 模式 0 的 builtin 标记在 4 + 16
         self.assertEqual(blob[4 + 16], 1)
-        # Mac 的 Up/短按 = CLICK + 1 步 KEY(0x28)
-        off = P.slot_offset(0, P.BTN_UP, P.SLOT_TAP)
+        # Mac 的 Down/短按 = CLICK + 1 步 KEY(0x28 回车;Up 短按已按用户要求置空)
+        off = P.slot_offset(0, P.BTN_DOWN, P.SLOT_TAP)
         self.assertEqual(blob[off], TRIGGER_CLICK)
         self.assertEqual(blob[off + 1], 1)
         step_off = off + 2
@@ -184,7 +184,7 @@ class TestChunks(unittest.TestCase):
         blob = catalog.factory_default_config().encode()
         chunks = P.split_chunks(blob)
         self.assertEqual(len(chunks), P.CHUNK_COUNT)
-        self.assertEqual([len(c) for c in chunks], [160] * 9 + [140])
+        self.assertEqual([len(c) for c in chunks], [160] * 14 + [60])
         self.assertEqual(P.join_chunks(chunks), blob)
 
     def test_split_rejects_wrong_size(self):
@@ -263,15 +263,20 @@ class TestActionNames(unittest.TestCase):
     def test_names_of_all_builtin_default_slots(self):
         cfg = catalog.factory_default_config()
         expect = {
-            # Mac 键位(用户定稿):长按上键=按住Fn说话,短按下键=回车,
+            # Mac 键位(用户定稿 2026-10-06 二改):长按上键=按住Fn说话,
+            # 短按上键=无;短按下键=回车,双击下键=Esc,长按下键=无;
             # 短按 OK=退格,长按 OK=进设置。
-            (0, P.BTN_UP, P.SLOT_TAP): "Enter",
+            (0, P.BTN_UP, P.SLOT_TAP): "-",
             (0, P.BTN_UP, P.SLOT_LONG): "Globe (hold)",
             (0, P.BTN_DOWN, P.SLOT_TAP): "Enter",
-            (0, P.BTN_DOWN, P.SLOT_LONG): "Settings",
+            (0, P.BTN_DOWN, P.SLOT_DOUBLE): "Esc",
+            (0, P.BTN_DOWN, P.SLOT_LONG): "-",
             (0, P.BTN_OK, P.SLOT_TAP): "Back",
             (0, P.BTN_OK, P.SLOT_LONG): "Settings",
+            # 其余三模式:通用键位(Up/Down 一样,OK 长按留空)。
+            (1, P.BTN_UP, P.SLOT_TAP): "Enter",
             (1, P.BTN_DOWN, P.SLOT_TAP): "Back",
+            (1, P.BTN_DOWN, P.SLOT_LONG): "Settings",
             (1, P.BTN_OK, P.SLOT_LONG): "-",
             (1, P.BTN_OK, P.SLOT_TAP): "Ctrl+Win (hold)",
             (2, P.BTN_OK, P.SLOT_TAP): "Space (hold)",
@@ -352,7 +357,7 @@ class TestRejections(unittest.TestCase):
         self.cfg.delete_profile(4)
         self.assertEqual(self.cfg.count, 4)
         self.assertEqual(self.cfg.active, 3, "删掉的是当前模式,active 要退到上一个")
-        self.assertEqual(len(self.cfg.encode()), 1580)
+        self.assertEqual(len(self.cfg.encode()), 2300)
 
     def test_delete_shifts_active_down(self):
         self.cfg.add_profile("A")
@@ -413,7 +418,7 @@ class TestRejections(unittest.TestCase):
             Step(kind=STEP_DELAY, delay_ms=70000).validate()
 
     def test_bad_version_rejected(self):
-        self.cfg.version = 2
+        self.cfg.version = 3
         with self.assertRaises(ProtocolError):
             self.cfg.validate()
 
@@ -451,13 +456,14 @@ class TestRejections(unittest.TestCase):
         self.assertEqual(P.parse_button("Up"), P.BTN_UP)
         self.assertEqual(P.parse_button(2), P.BTN_OK)
         self.assertEqual(P.parse_slot("long-press"), P.SLOT_LONG)
+        self.assertEqual(P.parse_slot("double-click"), P.SLOT_DOUBLE)
         self.assertEqual(P.parse_slot(0), P.SLOT_TAP)
         with self.assertRaises(ProtocolError):
             P.parse_button("Middle")
         with self.assertRaises(ProtocolError):
             P.parse_button(5)
         with self.assertRaises(ProtocolError):
-            P.parse_slot("double-click")
+            P.parse_slot("middle")
 
     def test_mods_parsing(self):
         self.assertEqual(P.parse_mods("Ctrl+Shift"), MOD_CTRL | MOD_SHIFT)

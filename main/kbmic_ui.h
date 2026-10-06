@@ -19,7 +19,7 @@ typedef enum {
     KBMIC_VIEW_ACT,        // 某个槽的动作选择
 } kbmic_view_t;
 
-#define KBMIC_UI_LINES_MAX 8
+#define KBMIC_UI_LINES_MAX 9
 #define KBMIC_UI_LABEL_MAX 14
 #define KBMIC_UI_VALUE_MAX 28
 

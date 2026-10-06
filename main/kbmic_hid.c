@@ -326,10 +326,10 @@ static void hid_event_cb(void *handler_args, esp_event_base_t base, int32_t id, 
         gap_adv_start();
         // 配置服务在这里才注册:esp_hid 内部电池/设备信息/HID 三个服务的
         // 建表链到本事件才走完,更早注册会与它并发建表,GATT 返回 133
-        // (2026-10-05 真机踩坑)。失败不阻塞:键盘照常用,只是 MCP 配不了。
-        if (kbmic_ble_svc_init() != ESP_OK) {
-            ESP_LOGE(TAG, "配置服务注册失败,MCP 将无法连接");
-        }
+        // (2026-10-05 真机踩坑)。注册本身投递到 svc 任务执行 —— 本回调
+        // 跑在 esp_hid 的 4KB 事件任务里,深调用链会把栈压穿。失败不阻塞:
+        // 键盘照常用,只是 MCP 配不了。
+        kbmic_ble_svc_request_register();
         break;
     case ESP_HIDD_CONNECT_EVENT:
         s_connected = true;

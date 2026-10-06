@@ -3,8 +3,8 @@
 这一份布局是**固件与 MCP 之间的共同契约**,逐字节对齐 main/kbmic_config.h 里的
 packed 结构体:
 
-    kbmic_config_t  = 4 + 8 * 197 = 1580 字节
-    kbmic_profile_t = 16 + 1 + 180 = 197 字节
+    kbmic_config_t  = 4 + 8 * 287 = 2300 字节
+    kbmic_profile_t = 16 + 1 + 270 = 287 字节
     kbmic_action_t  = 1 + 1 + 4*7 = 30 字节
     kbmic_step_t    = 1 + 1 + 1 + 2 + 2 = 7 字节
 
@@ -25,24 +25,24 @@ from typing import Iterable
 # 常量:与固件 kbmic_config.h 一一对应
 # ---------------------------------------------------------------------------
 
-CONFIG_VERSION = 1
+CONFIG_VERSION = 2
 MAX_PROFILES = 8
 BUILTIN_MODES = 4
 NAME_MAX = 16  # 含结尾 '\0',即最多 15 字节内容
 NAME_CONTENT_MAX = NAME_MAX - 1
 SEQ_MAX = 4
 BTN_COUNT = 3
-SLOT_COUNT = 2
+SLOT_COUNT = 3
 
 STEP_SIZE = 7
 ACTION_SIZE = 30
-PROFILE_SIZE = 197
+PROFILE_SIZE = 287
 HEADER_SIZE = 4
-CONFIG_SIZE = 1580  # 4 + 8 * 197
+CONFIG_SIZE = 2300  # 4 + 8 * 287
 
 # BLE 分片:main/kbmic_ble_svc.h 的 KBMIC_SVC_CHUNK_SIZE
 CHUNK_SIZE = 160
-CHUNK_COUNT = 10  # ceil(1580 / 160);第 10 片只有 140 字节
+CHUNK_COUNT = 15  # ceil(2300 / 160);第 15 片只有 60 字节
 
 # GATT UUID(与 main/kbmic_ble_svc.c 的 UUID128_LO 字面量对应)
 _UUID_TAIL = "-9f6e-4a21-8c3d-2b5e7a9f1c48"
@@ -74,8 +74,9 @@ TRIGGER_NONE = 0
 TRIGGER_CLICK = 1
 TRIGGER_TAP = 2
 TRIGGER_LONG = 3
-TRIGGERS = (TRIGGER_NONE, TRIGGER_CLICK, TRIGGER_TAP, TRIGGER_LONG)
-TRIGGER_NAMES = {0: "none", 1: "click", 2: "tap", 3: "long"}
+TRIGGER_DOUBLE = 4
+TRIGGERS = (TRIGGER_NONE, TRIGGER_CLICK, TRIGGER_TAP, TRIGGER_LONG, TRIGGER_DOUBLE)
+TRIGGER_NAMES = {0: "none", 1: "click", 2: "tap", 3: "long", 4: "double"}
 
 STEP_NONE = 0
 STEP_KEY = 1
@@ -102,11 +103,13 @@ BUTTON_ALIASES = {
 }
 
 SLOT_TAP = 0
-SLOT_LONG = 1
-SLOT_NAMES = {0: "short-tap", 1: "long-press"}
+SLOT_DOUBLE = 1
+SLOT_LONG = 2
+SLOT_NAMES = {0: "short-tap", 1: "double-click", 2: "long-press"}
 SLOT_ALIASES = {
     "tap": SLOT_TAP, "short": SLOT_TAP, "short-tap": SLOT_TAP, "短按": SLOT_TAP, "0": SLOT_TAP,
-    "long": SLOT_LONG, "hold": SLOT_LONG, "long-press": SLOT_LONG, "长按": SLOT_LONG, "1": SLOT_LONG,
+    "double": SLOT_DOUBLE, "double-click": SLOT_DOUBLE, "双击": SLOT_DOUBLE, "1": SLOT_DOUBLE,
+    "long": SLOT_LONG, "hold": SLOT_LONG, "long-press": SLOT_LONG, "长按": SLOT_LONG, "2": SLOT_LONG,
 }
 
 EV_BOOT = 0
@@ -306,7 +309,7 @@ class Action:
     def validate(self) -> None:
         if self.trigger not in TRIGGERS:
             raise ProtocolError(
-                f"trigger 非法: {self.trigger} (有效 0..3: none/click/tap/long)"
+                f"trigger 非法: {self.trigger} (有效 0..4: none/click/tap/long/double)"
             )
         if len(self.steps) > SEQ_MAX:
             raise ProtocolError(
@@ -672,11 +675,11 @@ def parse_slot(value) -> int:
 
 def parse_trigger(value) -> int:
     if isinstance(value, bool):
-        raise ProtocolError("trigger 必须是 none/click/tap/long 或 0..3")
+        raise ProtocolError("trigger 必须是 none/click/tap/long/double 或 0..4")
     if isinstance(value, int):
         if value in TRIGGERS:
             return value
-        raise ProtocolError(f"trigger 越界: {value} (有效 0..3)")
+        raise ProtocolError(f"trigger 越界: {value} (有效 0..4)")
     return _lookup_enum(TRIGGER_NAMES, str(value), "trigger")
 
 
@@ -806,13 +809,13 @@ def self_check() -> dict:
     assert STEP_SIZE == _STEP_FMT.size == 7
     assert HEADER_SIZE == _HDR_FMT.size == 4
     assert ACTION_SIZE == 2 + SEQ_MAX * STEP_SIZE == 30
-    assert PROFILE_SIZE == NAME_MAX + 1 + BTN_COUNT * SLOT_COUNT * ACTION_SIZE == 197
-    assert CONFIG_SIZE == HEADER_SIZE + MAX_PROFILES * PROFILE_SIZE == 1580
-    assert CHUNK_COUNT == (CONFIG_SIZE + CHUNK_SIZE - 1) // CHUNK_SIZE == 10
-    assert chunk_expected_len(9) == 140
+    assert PROFILE_SIZE == NAME_MAX + 1 + BTN_COUNT * SLOT_COUNT * ACTION_SIZE == 287
+    assert CONFIG_SIZE == HEADER_SIZE + MAX_PROFILES * PROFILE_SIZE == 2300
+    assert CHUNK_COUNT == (CONFIG_SIZE + CHUNK_SIZE - 1) // CHUNK_SIZE == 15
+    assert chunk_expected_len(14) == 60
     assert len(DEVICE_NAME.encode("utf-8")) == 11
-    assert profile_offset(1) == 4 + 197
-    assert step_offset(0, 2, 1, 3) == 4 + 17 + (2 * 2 + 1) * 30 + 2 + 3 * 7
+    assert profile_offset(1) == 4 + 287
+    assert step_offset(0, 2, 1, 3) == 4 + 17 + (2 * 3 + 1) * 30 + 2 + 3 * 7
 
     # 全零配置必须能编解码往返
     zero = Config(count=1, active=0, profiles=[Profile(name="-")])

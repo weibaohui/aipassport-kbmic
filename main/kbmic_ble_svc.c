@@ -9,7 +9,12 @@
 
 #include "kbmic_store.h"
 
+#include <stdlib.h>
 #include <string.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 
 #include "esp_assert.h"
 #include "esp_gatt_defs.h"
@@ -301,6 +306,38 @@ static void svc_event(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
 // ---------------------------------------------------------------------------
 // 全局 GATT 回调转发
 // ---------------------------------------------------------------------------
+// 配置服务的 GATTS 事件在 esp_hid 的 "ble_hidd_events" 任务里回调,那个
+// 任务栈只有 4KB —— 建表链(尤其 v2 的 15 片属性表)在里面必然栈溢出
+// (2026-10-06 真机踩坑,Stack protection fault 循环重启)。所以自家事件
+// 只拷贝参数入队,真正的处理放到本模块自己的大栈任务里,顺序不变。
+typedef struct {
+    esp_gatts_cb_event_t event;
+    esp_gatt_if_t gatts_if;
+    esp_ble_gatts_cb_param_t *param;   // dispatch 里 malloc 的事件参数拷贝
+} svc_msg_t;
+
+static QueueHandle_t s_svc_queue;
+
+// worker 的私有命令:0xFF = 执行 kbmic_ble_svc_init(GATTS app 注册)。
+#define SVC_CMD_INIT ((esp_gatts_cb_event_t)0xFF)
+
+static void svc_worker(void *arg)
+{
+    (void)arg;
+    svc_msg_t msg;
+    for (;;) {
+        if (xQueueReceive(s_svc_queue, &msg, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        if (msg.event == SVC_CMD_INIT) {
+            kbmic_ble_svc_init();
+            continue;
+        }
+        svc_event(msg.event, msg.gatts_if, msg.param);
+        free(msg.param);
+    }
+}
+
 static void dispatch(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
                      esp_ble_gatts_cb_param_t *param)
 {
@@ -311,19 +348,25 @@ static void dispatch(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
     // REG 事件要按 app_id 分流:自己的 gatts_if 是在这条事件里才发下来的,
     // 用 gatts_if 判断永远接不到自己的 REG(鸡生蛋),服务就永远注册不上
     // (2026-10-05 真机踩坑,日志表现为 BLE_HIDD "Unknown Application, 0x2040")。
-    if (event == ESP_GATTS_REG_EVT) {
-        if (param->reg.app_id == KBMIC_SVC_APP_ID) {
-            svc_event(event, gatts_if, param);
-        } else {
-            esp_hidd_gatts_event_handler(event, gatts_if, param);
-        }
+    const bool ours = (event == ESP_GATTS_REG_EVT)
+                          ? (param->reg.app_id == KBMIC_SVC_APP_ID)
+                          : (s_registered && gatts_if == s_gatts_if);
+    if (!ours) {
+        esp_hidd_gatts_event_handler(event, gatts_if, param);
         return;
     }
-    if (s_registered && gatts_if == s_gatts_if) {
-        svc_event(event, gatts_if, param);
+    if (s_svc_queue == NULL) {
+        svc_event(event, gatts_if, param);   // 队列未建(理论不可达)就原地跑
         return;
     }
-    esp_hidd_gatts_event_handler(event, gatts_if, param);
+    esp_ble_gatts_cb_param_t *copy = malloc(sizeof(*copy));
+    if (copy == NULL) {
+        ESP_LOGE(TAG, "事件参数拷贝失败,事件 %d 丢弃", event);
+        return;
+    }
+    memcpy(copy, param, sizeof(*copy));
+    const svc_msg_t msg = {.event = event, .gatts_if = gatts_if, .param = copy};
+    xQueueSend(s_svc_queue, &msg, 0);
 }
 
 esp_err_t kbmic_ble_svc_install_dispatch(void)
@@ -335,6 +378,15 @@ esp_err_t kbmic_ble_svc_install_dispatch(void)
     esp_err_t ret = esp_ble_gatts_register_callback(dispatch);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "GATTS 分发回调注册失败: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    if (s_svc_queue == NULL) {
+        s_svc_queue = xQueueCreate(16, sizeof(svc_msg_t));
+        if (s_svc_queue == NULL ||
+            xTaskCreate(svc_worker, "kbmic_svc", 6144, NULL, 5, NULL) != pdPASS) {
+            ESP_LOGE(TAG, "svc 任务创建失败");
+            return ESP_ERR_NO_MEM;
+        }
     }
     return ret;
 }
@@ -342,6 +394,14 @@ esp_err_t kbmic_ble_svc_install_dispatch(void)
 // ---------------------------------------------------------------------------
 // 对外
 // ---------------------------------------------------------------------------
+void kbmic_ble_svc_request_register(void)
+{
+    const svc_msg_t msg = {.event = SVC_CMD_INIT, .gatts_if = 0, .param = NULL};
+    if (s_svc_queue != NULL) {
+        xQueueSend(s_svc_queue, &msg, 0);
+    }
+}
+
 esp_err_t kbmic_ble_svc_init(void)
 {
     // 配置先进内存,GATT 建表时才能把特征值指到正确的内容上。

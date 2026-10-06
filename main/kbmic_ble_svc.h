@@ -45,6 +45,11 @@
 // 按注册顺序排队才不会互相踩。
 esp_err_t kbmic_ble_svc_init(void);
 
+// 请求"注册配置服务"(投递到 svc 任务异步执行)。必须在 HIDD START 事件里
+// 调用而不是直接调 kbmic_ble_svc_init:START 回调跑在 esp_hid 的 4KB 事件
+// 任务里,GATTS app 注册的 BTC 调用链会把那个栈压穿(2026-10-06 真机踩坑)。
+void kbmic_ble_svc_request_register(void);
+
 // 注册全局 GATT 回调。时机约束:**Bluedroid enable 之后**、任何
 // esp_ble_gatts_app_register 之前(包括 esp_hidd_dev_init 内部的那几次)。
 // 放在 Bluedroid 初始化前会静默失败,GATTS 事件从此无人接收。

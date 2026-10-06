@@ -18,7 +18,8 @@
 void kbmic_mcp_init(void);
 
 // 模拟触发回调:main 注入(要往按键队列里投递事件)。
-typedef void (*kbmic_sim_fn_t)(int btn, bool long_press);
+// kind:0=短按 1=长按 2=双击。
+typedef void (*kbmic_sim_fn_t)(int btn, int kind);
 void kbmic_mcp_set_simulate(kbmic_sim_fn_t fn);
 
 // ---- JSON 序列化(kbmic_web 的门户端点复用) ----

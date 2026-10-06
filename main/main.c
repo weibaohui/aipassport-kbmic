@@ -85,7 +85,11 @@ static const char *btn_key_name(int b)
 
 static const char *slot_name(int s)
 {
-    return (s == KBMIC_SLOT_LONG) ? "长按" : "短按";
+    switch (s) {
+    case KBMIC_SLOT_DOUBLE: return "双击";
+    case KBMIC_SLOT_LONG:   return "长按";
+    default:                return "短按";
+    }
 }
 
 // 当前生效模式的某个槽。BLE 配置在外部被改过之后,这里每次都重新取,
@@ -146,6 +150,13 @@ static void on_key_home(int btn, bsp_btn_ev_t ev)
             kbmic_action_release();
         } else if (!s_in_long[btn] && tap_slot->trigger == KBMIC_TRIG_CLICK) {
             run_slot(btn, KBMIC_SLOT_TAP);
+        }
+        break;
+
+    case BSP_BTN_DOUBLE:
+        // 双击:跑"双击槽"里配了 DOUBLE 触发的动作(与短按互斥由 BSP 保证)。
+        if (slot_of(btn, KBMIC_SLOT_DOUBLE)->trigger == KBMIC_TRIG_DOUBLE) {
+            run_slot(btn, KBMIC_SLOT_DOUBLE);
         }
         break;
 
@@ -612,20 +623,26 @@ static void app_task(void *arg)
 // MCP 模拟触发回调
 //
 // 把合成按键事件投进 s_key_queue,与真人按键走完全同一条路径(状态机、HID、
-// 界面反馈一致)。序列:PRESS → LONG/CLICK → CLICK(收尾,放掉按住的 TAP)。
+// 界面反馈一致)。kind 0=短按:PRESS→CLICK;1=长按:PRESS→LONG→CLICK;
+// 2=双击:单发 DOUBLE。
 // ---------------------------------------------------------------------------
-static void simulate_inject(int btn, bool long_press)
+static void simulate_inject(int btn, int kind)
 {
     if (s_key_queue == NULL || !s_keys_ready) {
         return;
     }
+    if (kind == 2) {   // 双击:单发 DOUBLE 事件(手势判定在 BSP 侧)
+        const int dbl = (btn & 0xF) | ((int)BSP_BTN_DOUBLE << 4);
+        xQueueSend(s_key_queue, &dbl, 0);
+        return;
+    }
     const int press = (btn & 0xF) | ((int)BSP_BTN_PRESS << 4);
     const int act = (btn & 0xF) |
-                    (((int)(long_press ? BSP_BTN_LONG : BSP_BTN_CLICK)) << 4);
+                    (((int)(kind == 1 ? BSP_BTN_LONG : BSP_BTN_CLICK)) << 4);
     const int rel = (btn & 0xF) | ((int)BSP_BTN_CLICK << 4);
     xQueueSend(s_key_queue, &press, 0);
     xQueueSend(s_key_queue, &act, 0);
-    if (long_press) {
+    if (kind == 1) {
         xQueueSend(s_key_queue, &rel, 0);
     }
 }

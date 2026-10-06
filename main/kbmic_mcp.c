@@ -46,7 +46,11 @@ static const char *btn_name(int b)
 
 static const char *slot_name(int s)
 {
-    return (s == KBMIC_SLOT_LONG) ? "long-press" : "short-tap";
+    switch (s) {
+    case KBMIC_SLOT_DOUBLE: return "double-click";
+    case KBMIC_SLOT_LONG:   return "long-press";
+    default:                return "short-tap";
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -314,7 +318,7 @@ static int tool_set_key(cJSON *args, appfw_mcp_resp_t *resp)
     const cJSON *slot = cJSON_GetObjectItemCaseSensitive(args, "slot");
     if (!cJSON_IsNumber(idx) || !cJSON_IsNumber(btn) || !cJSON_IsNumber(slot)) {
         appfw_mcp_resp_addf(resp, "参数 index/button/slot(number)缺失"
-                                  "(button:0=Up 1=Down 2=OK;slot:0=短按 1=长按)");
+                                  "(button:0=Up 1=Down 2=OK;slot:0=短按 1=双击 2=长按)");
         return 1;
     }
     const cJSON *preset = cJSON_GetObjectItemCaseSensitive(args, "preset");
@@ -368,7 +372,12 @@ static int tool_set_key(cJSON *args, appfw_mcp_resp_t *resp)
     }
 
     // 长按槽强制 LONG 触发:否则阈值到点后没人收尾,按住不放会一直重复。
-    if (slot->valueint == KBMIC_SLOT_LONG) action.trigger = KBMIC_TRIG_LONG;
+    // 双击槽同理强制 DOUBLE(动作本体照发,只是触发语义跟槽走)。
+    if (slot->valueint == KBMIC_SLOT_LONG) {
+        action.trigger = KBMIC_TRIG_LONG;
+    } else if (slot->valueint == KBMIC_SLOT_DOUBLE) {
+        action.trigger = KBMIC_TRIG_DOUBLE;
+    }
 
     kbmic_config_t work = *kbmic_config_current();
     if (idx->valueint < 0 || idx->valueint >= work.count ||
@@ -406,15 +415,26 @@ static int tool_simulate(cJSON *args, appfw_mcp_resp_t *resp)
         appfw_mcp_resp_addf(resp, "参数 button(number,0=Up 1=Down 2=OK)缺失");
         return 1;
     }
-    const bool long_press = (cJSON_IsString(press) && !strcasecmp(press->valuestring, "long")) ||
-                            (cJSON_IsNumber(press) && press->valueint == 1);
+    int kind = 0;   // 0=短按 1=长按 2=双击
+    if (cJSON_IsString(press) && !strcasecmp(press->valuestring, "long")) {
+        kind = 1;
+    } else if (cJSON_IsString(press) && !strcasecmp(press->valuestring, "double")) {
+        kind = 2;
+    } else if (cJSON_IsNumber(press)) {
+        kind = press->valueint;
+    }
+    if (kind < 0 || kind > 2) {
+        appfw_mcp_resp_addf(resp, "press 取值: tap / long / double");
+        return 1;
+    }
     if (!s_sim) {
         appfw_mcp_resp_addf(resp, "模拟触发未接入");
         return 1;
     }
-    s_sim(btn->valueint, long_press);
+    static const char *const kind_name[] = { "短按", "长按", "双击" };
+    s_sim(btn->valueint, kind);
     appfw_mcp_resp_addf(resp, "已模拟 %s %s(按当前模式执行对应槽的动作)",
-                        btn_name(btn->valueint), long_press ? "长按" : "短按");
+                        btn_name(btn->valueint), kind_name[kind]);
     return 0;
 }
 

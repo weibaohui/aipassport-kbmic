@@ -253,7 +253,7 @@ static const char k_card[] =
 "document.getElementById('kbmic_modes').innerHTML=s;"
 "var m={slots:d.slots},h='<table border=0 style=\"margin-top:6px\">';"
 "for(var j=0;j<m.slots.length;j++){var sl=m.slots[j];"
-"h+='<tr><td style=\"padding:2px 8px 2px 0\">'+sl.button+'/'+(sl.slot_index?'长按':'短按')+'</td>'"
+"h+='<tr><td style=\"padding:2px 8px 2px 0\">'+sl.button+'/'+sl.slot+'</td>'"
 "+'<td style=\"padding:2px 8px\">'+sl.action.display+'</td>'"
 "+'<td><select id=\"km_p'+j+'\">';"
 "for(var k=0;k<d.catalog.length;k++)h+='<option value=\"'+d.catalog[k].id+'\">'+d.catalog[k].name+'</option>';"

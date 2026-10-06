@@ -6,7 +6,7 @@
 //
 // 设计取舍:
 //   * 模式:4 个内置(Mac / Windows / Android / iOS)+ 最多 4 个用户自定义,上限 8。
-//   * 每个模式 3 个键 × 2 个触发槽(短按 / 长按)。为什么是 2 而不是 1:
+//   * 每个模式 3 个键 × 3 个触发槽(短按 / 双击 / 长按)。
 //     "按住说话"要按下即发、松手才停,和"点一下回车"不是同一种触发语义,
 //     但它们占的是同一个物理键,拆成两个槽最省事。
 //   * 一个动作由最多 4 步组成,每步可以是一次带修饰键的敲击、一次 Consumer
@@ -28,9 +28,9 @@
 #define KBMIC_NAME_MAX 16       // 模式名 UTF-8 字节数上限(含结尾 '\0',即最多 15 字节)
 #define KBMIC_SEQ_MAX 4         // 一个动作最多 4 步
 #define KBMIC_BTN_COUNT 3       // 上 / 下 / OK
-#define KBMIC_SLOT_COUNT 2      // 短按 / 长按
+#define KBMIC_SLOT_COUNT 3      // 短按 / 双击 / 长按
 
-#define KBMIC_CONFIG_VERSION 1
+#define KBMIC_CONFIG_VERSION 2
 
 // ---------------------------------------------------------------------------
 // HID 键码与用法码
@@ -60,10 +60,12 @@ typedef enum {
     KBMIC_BTN_OK,
 } kbmic_button_t;
 
-// 触发槽。
+// 触发槽。v2 起每键 3 槽:短按/双击互斥由 BSP 区分(双击窗口内的第二次
+// 按下不再产生短按事件),单双击并存的键短按报告会稍晚(等窗口过期)。
 typedef enum {
-    KBMIC_SLOT_TAP = 0,   // 短按:按下即发,保持到松手
-    KBMIC_SLOT_LONG,      // 长按:按住超过阈值时发一次
+    KBMIC_SLOT_TAP = 0,    // 短按:点一下(或按住触发,见 trigger)
+    KBMIC_SLOT_DOUBLE,     // 双击:快速按两下
+    KBMIC_SLOT_LONG,       // 长按:按住超过阈值时发一次
 } kbmic_slot_t;
 
 // 触发语义。存在槽里而不是"按下就发、短按发一次"里区分,是因为 TAP 与 CLICK
@@ -73,6 +75,7 @@ typedef enum {
     KBMIC_TRIG_CLICK,      // 松手时发一次完整序列
     KBMIC_TRIG_TAP,        // 按下即发,松手时补一条全零报告
     KBMIC_TRIG_LONG,       // 长按阈值到时发一次完整序列
+    KBMIC_TRIG_DOUBLE,     // 双击时发一次完整序列
 } kbmic_trigger_t;
 
 typedef enum {
