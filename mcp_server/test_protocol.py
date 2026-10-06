@@ -304,6 +304,7 @@ class TestActionNames(unittest.TestCase):
             13: "F1",
             14: "F2",
             15: "Settings",
+            16: "Fn (hold)",
         }
         for item in catalog.CATALOG:
             self.assertEqual(P.action_name(item.action), want[item.id], f"id {item.id}")

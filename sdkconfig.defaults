@@ -43,7 +43,7 @@ CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_20=y
 # 中文界面:UTF-8 编码 + 缺字占位(缺字必须可见,不得静默空白)。
 CONFIG_LV_TXT_ENC_UTF8=y
-CONFIG_LV_USE_FONT_PLACEHOLDER=y
+# CONFIG_LV_USE_FONT_PLACEHOLDER is not set
 # 中文正文用本应用自建的 16px 子集(app_font_16,约 81KB),由
 # assets/fonts/kbmic_charset.txt 经 lv_font_conv 生成。
 #

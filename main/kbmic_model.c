@@ -167,14 +167,14 @@ static bool name_ok(const char *name)
 
 static bool action_ok(const kbmic_action_t *a)
 {
-    if (a->trigger > KBMIC_TRIG_LONG) {
+    if (a->trigger > KBMIC_TRIG_DOUBLE) {
         return false;
     }
     if (a->step_count > KBMIC_SEQ_MAX) {
         return false;
     }
     for (uint8_t i = 0; i < a->step_count; i++) {
-        if (a->steps[i].kind > KBMIC_STEP_DELAY) {
+        if (a->steps[i].kind > KBMIC_STEP_APPLEFN) {
             return false;
         }
     }
@@ -395,6 +395,9 @@ char *kbmic_action_name(const kbmic_action_t *a, char *buf, size_t cap)
             break;
         case KBMIC_STEP_DELAY:
             len += snprintf(buf + len, cap - len, "+%ums", s->delay_ms);
+            break;
+        case KBMIC_STEP_APPLEFN:
+            len += snprintf(buf + len, cap - len, "Fn");
             break;
         default:
             break;

@@ -83,6 +83,7 @@ typedef enum {
     KBMIC_STEP_KEY,        // 键盘报告:mods + keycode
     KBMIC_STEP_CONSUMER,   // Consumer 报告:16 位 usage(Globe 之类)
     KBMIC_STEP_DELAY,      // 什么都不发,只等 delay_ms
+    KBMIC_STEP_APPLEFN,    // Apple Fn(键盘报告第 2 字节私有化,macOS 的 Fn/Globe)
 } kbmic_step_kind_t;
 
 // 修饰键位。顺序即 HID 键盘报告第 0 字节的 bit 位。

@@ -72,10 +72,17 @@ static const char *TAG = "kbmic_hid";
 // ---------------------------------------------------------------------------
 
 // report map 0:标准 8 字节键盘报告(boot 布局:1B 修饰键 + 1B 保留 + 6B 键码)。
+// 报告 ID 与描述符里的 0x85 项一致;esp_hid 按 id 定位要发送的特征。
+#define KBMIC_REPORT_ID_KEYBOARD 1
+#define KBMIC_REPORT_ID_CONSUMER 2
+
 static const uint8_t s_map_keyboard[] = {
     0x05, 0x01,        // Usage Page (Generic Desktop)
     0x09, 0x06,        // Usage (Keyboard)
     0xA1, 0x01,        // Collection (Application)
+    0x85, 0x01,        //   Report ID (1) —— 两个报告并存必须各带 ID,否则 macOS
+                       //   会把两个都绑到先解析到的那个特征上(真机踩坑:
+                       //   没有 ID 时 Consumer 报告被发进键盘特征,Globe/Fn 不识别)
     0x05, 0x07,        //   Usage Page (Key Codes)
 
     0x19, 0xE0,        //   Usage Minimum (224 = LeftControl)
@@ -86,9 +93,17 @@ static const uint8_t s_map_keyboard[] = {
     0x95, 0x08,        //   Report Count (8)
     0x81, 0x02,        //   Input (Data,Var,Abs)      -> 修饰键字节
 
+    // 原来的保留字节私有化为 Apple Fn:AppleVendor Top Case 页(0xFF),
+    // Usage 0x03(KeyboardFn)。macOS 由此识别 Fn/Globe(系统听写、微信
+    // 按住说话都认它),普通 6KRO 报告长度不变(8 字节)。参考:
+    // NordicBTKeyBridge / QMK AppleVendor Top Case 社区实现。
+    0x05, 0xFF,        //   Usage Page (AppleVendor Top Case)
+    0x09, 0x03,        //   Usage (KeyboardFn)
+    0x15, 0x00,        //   Logical Minimum (0)
+    0x25, 0x01,        //   Logical Maximum (1)
     0x95, 0x01,        //   Report Count (1)
     0x75, 0x08,        //   Report Size (8)
-    0x81, 0x01,        //   Input (Cnst)              -> 保留字节(必须补齐)
+    0x81, 0x02,        //   Input (Data,Var,Abs)      -> Apple Fn 字节
 
     // 这里**不能**再插 5 bit + 3 bit 的填充项。那是鼠标描述符的尾巴,
     // 键盘不需要:1 字节 modifier + 1 字节 reserved 已经把字节对齐了,
@@ -136,6 +151,7 @@ static const uint8_t s_map_consumer[] = {
     0x05, 0x0C,        // Usage Page (Consumer)
     0x09, 0x01,        // Usage (Consumer Control)
     0xA1, 0x01,        // Collection (Application)
+    0x85, 0x02,        //   Report ID (2)
     0x15, 0x00,        //   Logical Minimum (0)        —— 0x15 = 1 字节形式
     0x26, 0x9D, 0x02,  //   Logical Maximum (0x029D)   —— 0x26 = 2 字节形式
     0x1A, 0x01, 0x00,  //   Usage Minimum (0x0001)     —— 0x1A = 2 字节形式
@@ -399,23 +415,24 @@ esp_err_t kbmic_hid_set_battery(int percent)
     return esp_hidd_dev_battery_set(s_hid_dev, (uint8_t)percent);
 }
 
-esp_err_t kbmic_hid_key_hold(uint8_t modifier, uint8_t keycode, bool pressed)
+esp_err_t kbmic_hid_key_hold(uint8_t modifier, uint8_t apple_fn, uint8_t keycode, bool pressed)
 {
     if (s_hid_dev == NULL || !kbmic_hid_connected()) return ESP_ERR_INVALID_STATE;
     uint8_t report[8] = {0};
     if (pressed) {
         report[0] = modifier;
+        report[1] = apple_fn ? 0x01 : 0x00;   // Apple Fn 字节(见描述符)
         report[2] = keycode;
     }
-    return esp_hidd_dev_input_set(s_hid_dev, KBMIC_MAP_KEYBOARD, 0, report, sizeof(report));
+    return esp_hidd_dev_input_set(s_hid_dev, KBMIC_MAP_KEYBOARD, KBMIC_REPORT_ID_KEYBOARD, report, sizeof(report));
 }
 
 esp_err_t kbmic_hid_tap(uint8_t modifier, uint8_t keycode)
 {
-    esp_err_t ret = kbmic_hid_key_hold(modifier, keycode, true);
+    esp_err_t ret = kbmic_hid_key_hold(modifier, 0, keycode, true);
     if (ret != ESP_OK) return ret;
     vTaskDelay(pdMS_TO_TICKS(KBMIC_TAP_HOLD_MS));
-    return kbmic_hid_key_hold(0, 0, false);
+    return kbmic_hid_key_hold(0, 0, 0, false);
 }
 
 esp_err_t kbmic_hid_consumer(uint16_t usage, bool pressed)
@@ -426,5 +443,5 @@ esp_err_t kbmic_hid_consumer(uint16_t usage, bool pressed)
         report[0] = (uint8_t)(usage & 0xFF);        // 16 位小端
         report[1] = (uint8_t)(usage >> 8);
     }
-    return esp_hidd_dev_input_set(s_hid_dev, KBMIC_MAP_CONSUMER, 0, report, sizeof(report));
+    return esp_hidd_dev_input_set(s_hid_dev, KBMIC_MAP_CONSUMER, KBMIC_REPORT_ID_CONSUMER, report, sizeof(report));
 }

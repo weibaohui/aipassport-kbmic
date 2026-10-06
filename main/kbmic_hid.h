@@ -33,7 +33,7 @@ esp_err_t kbmic_hid_tap(uint8_t modifier, uint8_t keycode);
 
 // 按住类动作的半边。pressed=true 发按下报告,false 发全零释放报告。
 // 语音输入是"按住说话",必须用这对接口,由调用方保持住状态。
-esp_err_t kbmic_hid_key_hold(uint8_t modifier, uint8_t keycode, bool pressed);
+esp_err_t kbmic_hid_key_hold(uint8_t modifier, uint8_t apple_fn, uint8_t keycode, bool pressed);
 
 // Consumer 报告的按下/释放。usage 见 KBMIC_HID_USAGE_GLOBE。
 esp_err_t kbmic_hid_consumer(uint16_t usage, bool pressed);

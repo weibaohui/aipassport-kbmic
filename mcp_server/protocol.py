@@ -82,8 +82,9 @@ STEP_NONE = 0
 STEP_KEY = 1
 STEP_CONSUMER = 2
 STEP_DELAY = 3
-STEP_KINDS = (STEP_NONE, STEP_KEY, STEP_CONSUMER, STEP_DELAY)
-STEP_KIND_NAMES = {0: "none", 1: "key", 2: "consumer", 3: "delay"}
+STEP_APPLEFN = 4
+STEP_KINDS = (STEP_NONE, STEP_KEY, STEP_CONSUMER, STEP_DELAY, STEP_APPLEFN)
+STEP_KIND_NAMES = {0: "none", 1: "key", 2: "consumer", 3: "delay", 4: "applefn"}
 STEP_KIND_VALUES = {name: value for value, name in STEP_KIND_NAMES.items()}
 
 MOD_CTRL = 0x01
@@ -225,7 +226,7 @@ class Step:
         if isinstance(kind, str):
             kind = STEP_KIND_VALUES.get(kind.strip().lower())
         if kind is None:
-            raise ProtocolError("step 缺少 kind 字段(0/1/2/3 或 none/key/consumer/delay)")
+            raise ProtocolError("step 缺少 kind 字段(0..4 或 none/key/consumer/delay/applefn)")
         mods = d.get("mods", 0)
         if isinstance(mods, str):  # 允许 "Ctrl+Shift" 这种写法
             mods = parse_mods(mods)
@@ -245,7 +246,7 @@ class Step:
     def validate(self) -> None:
         if self.kind not in STEP_KINDS:
             raise ProtocolError(
-                f"step.kind 非法: {self.kind} (有效 0..3: none/key/consumer/delay)"
+                f"step.kind 非法: {self.kind} (有效 0..4: none/key/consumer/delay/applefn)"
             )
         if not 0 <= self.keycode <= 0xFF:
             raise ProtocolError("step.keycode 必须是 0..255 的 HID 用法码")
@@ -685,11 +686,11 @@ def parse_trigger(value) -> int:
 
 def parse_kind(value) -> int:
     if isinstance(value, bool):
-        raise ProtocolError("kind 必须是 none/key/consumer/delay 或 0..3")
+        raise ProtocolError("kind 必须是 none/key/consumer/delay/applefn 或 0..4")
     if isinstance(value, int):
         if value in STEP_KINDS:
             return value
-        raise ProtocolError(f"kind 越界: {value} (有效 0..3)")
+        raise ProtocolError(f"kind 越界: {value} (有效 0..4)")
     key = str(value).strip().lower()
     if key in STEP_KIND_VALUES:
         return STEP_KIND_VALUES[key]
@@ -719,6 +720,8 @@ def _step_text(step: Step) -> str:
         return "Globe" if step.usage == USAGE_GLOBE else "C:0x%04X" % step.usage
     if step.kind == STEP_DELAY:
         return "+%dms" % step.delay_ms
+    if step.kind == STEP_APPLEFN:
+        return "Fn"
     return ""
 
 
@@ -755,7 +758,7 @@ def action_text(action: Action, cap: int = ACTION_NAME_MAX) -> str:
 # ---------------------------------------------------------------------------
 
 def split_chunks(blob: bytes) -> list[bytes]:
-    """1580 字节切成 10 片(前 9 片 160,第 10 片 140)。"""
+    """2300 字节切成 15 片(前 14 片 160,第 15 片 60)。"""
     if len(blob) != CONFIG_SIZE:
         raise ProtocolError(f"待写入的配置必须是 {CONFIG_SIZE} 字节,收到 {len(blob)} 字节")
     return [blob[i * CHUNK_SIZE: (i + 1) * CHUNK_SIZE] for i in range(CHUNK_COUNT)]

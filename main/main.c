@@ -153,6 +153,16 @@ static void on_key_home(int btn, bsp_btn_ev_t ev)
         }
         break;
 
+    case BSP_BTN_LONG_UP:
+        // 长按后的松开:按住类动作(TAP,如说话)的正式收尾点。
+        // 此前只能等松手的 CLICK 兜底,而菜单里那次 CLICK 会被吞掉,
+        // 造成"松开上键界面一直显示说话中"。
+        if (s_held[btn]) {
+            s_held[btn] = false;
+            kbmic_action_release();
+        }
+        break;
+
     case BSP_BTN_DOUBLE:
         // 双击:跑"双击槽"里配了 DOUBLE 触发的动作(与短按互斥由 BSP 保证)。
         if (slot_of(btn, KBMIC_SLOT_DOUBLE)->trigger == KBMIC_TRIG_DOUBLE) {

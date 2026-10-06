@@ -240,7 +240,7 @@ void kbmic_ui_render(const kbmic_ui_state_t *st)
 
         char label[KBMIC_UI_LABEL_MAX + 4];
         if (st->show_cursor && i == st->cursor) {
-            snprintf(label, sizeof(label), "▸%s", st->lines[i].label);
+            snprintf(label, sizeof(label), "> %s", st->lines[i].label);
         } else {
             snprintf(label, sizeof(label), " %s", st->lines[i].label);
         }

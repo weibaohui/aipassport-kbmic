@@ -16,6 +16,7 @@ static const char *TAG = "kbmic_action";
 
 static bool s_key_held;
 static bool s_consumer_held;
+static bool s_applefn_held;
 
 // ---------------------------------------------------------------------------
 // 内置动作目录
@@ -39,6 +40,7 @@ static bool s_consumer_held;
 #define ACT_F1       13
 #define ACT_F2       14
 #define ACT_SETTINGS 15
+#define ACT_APPLEFN  16
 
 // 目录表必须能用在 static 初始化里,所以不能靠构造函数拼 —— 那不是常量表达式。
 // 代价是每一条都要写满四层花括号(steps 是结构体数组),少一层就触发
@@ -49,6 +51,7 @@ static bool s_consumer_held;
 #define S_CONSUMER(usage)    {KBMIC_STEP_CONSUMER, 0, 0, (usage), 0}
 // "进设置"这种纯软件动作:kind=NONE 且 mods 的高位 bit4 是保留标记。
 #define S_SETTINGS           {KBMIC_STEP_NONE, 0xF0, 0, 0, 0}
+#define S_APPLEFN            {KBMIC_STEP_APPLEFN, 0, 0, 0, 0}
 
 // 一个动作:(触发方式, 步数, s0..s3)
 #define ACT(trig, n, s0, s1, s2, s3) {(trig), (n), {s0, s1, s2, s3}}
@@ -74,6 +77,7 @@ static const kbmic_catalog_item_t s_catalog[] = {
     ITEM(ACT_F1, "F1", ACT(KBMIC_TRIG_CLICK, 1, S_KEY(0, 0x3A), S_EMPTY, S_EMPTY, S_EMPTY)),
     ITEM(ACT_F2, "F2", ACT(KBMIC_TRIG_CLICK, 1, S_KEY(0, 0x3B), S_EMPTY, S_EMPTY, S_EMPTY)),
     ITEM(ACT_SETTINGS, "Settings", ACT(KBMIC_TRIG_NONE, 1, S_SETTINGS, S_EMPTY, S_EMPTY, S_EMPTY)),
+    ITEM(ACT_APPLEFN, "Apple Fn (hold)", ACT(KBMIC_TRIG_TAP, 1, S_APPLEFN, S_EMPTY, S_EMPTY, S_EMPTY)),
 };
 
 uint8_t kbmic_catalog_count(void)
@@ -113,7 +117,7 @@ esp_err_t kbmic_action_run(const kbmic_action_t *a)
         case KBMIC_STEP_KEY:
             if (a->trigger == KBMIC_TRIG_TAP) {
                 s_key_held = true;
-                kbmic_hid_key_hold(s->mods, s->keycode, true);
+                kbmic_hid_key_hold(s->mods, 0, s->keycode, true);
             } else {
                 kbmic_hid_tap(s->mods, s->keycode);
             }
@@ -127,6 +131,18 @@ esp_err_t kbmic_action_run(const kbmic_action_t *a)
                 kbmic_hid_consumer(s->usage, true);
                 vTaskDelay(pdMS_TO_TICKS(ACTION_HOLD_MS));
                 kbmic_hid_consumer(s->usage, false);
+            }
+            break;
+
+        case KBMIC_STEP_APPLEFN:
+            // Apple Fn:按住期间把键盘报告第 2 字节置 1(TAP),松手归零。
+            if (a->trigger == KBMIC_TRIG_TAP) {
+                s_applefn_held = true;
+                kbmic_hid_key_hold(0, 1, 0, true);
+            } else {
+                kbmic_hid_key_hold(0, 1, 0, true);
+                vTaskDelay(pdMS_TO_TICKS(ACTION_HOLD_MS));
+                kbmic_hid_key_hold(0, 0, 0, false);
             }
             break;
 
@@ -147,11 +163,15 @@ esp_err_t kbmic_action_release(void)
 {
     if (s_key_held) {
         s_key_held = false;
-        kbmic_hid_key_hold(0, 0, false);
+        kbmic_hid_key_hold(0, 0, 0, false);
     }
     if (s_consumer_held) {
         s_consumer_held = false;
         kbmic_hid_consumer(0, false);
+    }
+    if (s_applefn_held) {
+        s_applefn_held = false;
+        kbmic_hid_key_hold(0, 0, 0, false);
     }
     return ESP_OK;
 }

@@ -25,6 +25,7 @@ from protocol import (
     MOD_FLAG,
     MOD_GUI,
     MOD_SHIFT,
+    STEP_APPLEFN,
     STEP_CONSUMER,
     STEP_DELAY,
     STEP_KEY,
@@ -54,6 +55,11 @@ def step_delay(ms: int) -> Step:
 def step_settings() -> Step:
     """Settings 软件动作:不发 HID 报告,main 拦截后切到机身菜单。"""
     return Step(kind=STEP_NONE, mods=MOD_FLAG)
+
+def step_applefn() -> Step:
+    """Apple Fn 步:键盘报告 AppleVendor Top Case 字节(见固件 KBMIC_STEP_APPLEFN)。"""
+    return Step(kind=STEP_APPLEFN)
+
 
 
 def action_click(*steps: Step) -> Action:
@@ -130,6 +136,7 @@ CATALOG: list[CatalogItem] = [
     CatalogItem(13, "F1", action_click(step_key(KEY_F1))),
     CatalogItem(14, "F2", action_click(step_key(KEY_F2))),
     CatalogItem(15, "Settings", action_settings(), "软件动作:打开机身菜单,不发 HID 报告"),
+    CatalogItem(16, "Apple Fn (hold)", action_tap(step_applefn()), "按住=Fn 按下,松开=Fn 抬起;macOS 的 Fn/Globe 键(Mac 模式说话用)"),
 ]
 
 CATALOG_BY_ID = {item.id: item for item in CATALOG}
