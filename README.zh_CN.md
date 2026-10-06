@@ -95,7 +95,7 @@ ESP32-C3 只有 Bluetooth LE,没有经典蓝牙(BR/EDR),HFP 免提协议这条�
 
 **按键配置**:6 行 = 3 个键 × 2 个槽,每行右侧是这个槽当前的动作名。
 
-**动作选择**:从 16 个内置预设里挑(回车、退格、Tab、空格、Esc、Globe、Ctrl+Win、方向键、F1/F2、回车×3、进设置…)。
+**动作选择**:从 17 个内置预设里挑(回车、退格、Tab、空格、Esc、Globe、Ctrl+Win、方向键、F1/F2、回车×3、进设置…)。
 
 导航约定:上下键移动光标,OK 选中,**长按 OK 返回**上一层。
 
@@ -151,7 +151,7 @@ kbmic_set_active_mode(index=4)
 kbmic_delete_mode(index=0)                 # 会被拒绝:内置模式
 ```
 
-12 个工具(列模式、加删模式、改键、恢复出厂、订阅事件……),完整清单与注册方法见 [mcp_server/README.zh_CN.md](mcp_server/README.zh_CN.md)。
+设备端 MCP 工具(列模式、加删模式、改键、恢复出厂、订阅事件……),完整清单与注册方法见 [mcp_server/README.zh_CN.md](mcp_server/README.zh_CN.md)。
 
 <details>
 <summary>自己装一个</summary>
@@ -176,12 +176,12 @@ MCP 客户端配置:
 
 ```
 Service        7d1c5a30-9f6e-4a21-8c3d-2b5e7a9f1c48
-Config chunk 0 7d1c5a40-…  read / write     共 10 片,前 9 片 160 字节
-Config chunk 9 7d1c5a49-…  read / write     第 10 片 140 字节
+Config chunk 0 7d1c5a40-…  read / write     共 15 片,前 14 片 160 字节
+Config chunk 14 7d1c5a4e-… read / write     第 15 片 60 字节
 Event          7d1c5a4f-…  read / notify
 ```
 
-整份配置 1580 字节,小端、packed、无对齐空洞。**分片是因为 IDF 5.5 的 GATT server 公开 API 里没有长读/长写入口**,与其依赖内部实现,不如用最普通的 read/write,跨 macOS/iOS/Android 都不踩协议栈差异。设备收齐 10 片并通过校验才提交落盘,所以不存在写了一半的中间状态;写完 MCP 会读回来比对。
+整份配置 2300 字节,小端、packed、无对齐空洞。**分片是因为 IDF 5.5 的 GATT server 公开 API 里没有长读/长写入口**,与其依赖内部实现,不如用最普通的 read/write,跨 macOS/iOS/Android 都不踩协议栈差异。设备收齐 15 片并通过校验才提交落盘,所以不存在写了一半的中间状态;写完 MCP 会读回来比对。
 
 ## 配对
 
@@ -238,7 +238,7 @@ main/
   kbmic_config.h  配置模型与线协议结构体(纯 C,无 ESP-IDF 依赖)
   kbmic_model.c   出厂默认、合法性、增删模式、动作名反推(可在主机上编译测试)
   kbmic_store.c   NVS 持久化与生效副本
-  kbmic_action.c  动作执行器 + 16 个内置预设
+  kbmic_action.c  动作执行器 + 17 个内置预设
   kbmic_hid.c     BLE HID:两张 report map(键盘 + Consumer)、GAP 薄层、配对
   kbmic_ble_svc.c 配置服务:分片读写、暂存校验、事件通知
   kbmic_ui.c      五屏渲染

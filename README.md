@@ -124,12 +124,12 @@ MCP client config:
 
 ```
 Service        7d1c5a30-9f6e-4a21-8c3d-2b5e7a9f1c48
-Config chunk 0 7d1c5a40-…  read / write     10 chunks; the first 9 are 160 bytes
-Config chunk 9 7d1c5a49-…  read / write     the tenth is 140 bytes
+Config chunk 0 7d1c5a40-…  read / write     15 chunks; the first 14 are 160 bytes
+Config chunk 14 7d1c5a4e-… read / write     the fifteenth is 60 bytes
 Event          7d1c5a4f-…  read / notify
 ```
 
-The whole configuration is 1580 bytes, little-endian, packed, with no padding. **The chunking exists because IDF 5.5's GATT server has no public long-read/long-write entry point** — rather than depend on internal behaviour, the transport uses plain single reads and writes, which behave identically across macOS, iOS, and Android. The device commits and saves only after all 10 chunks arrive and validate, so there is no half-written state; afterwards the server reads the config back and compares.
+The whole configuration is 2300 bytes, little-endian, packed, with no padding. **The chunking exists because IDF 5.5's GATT server has no public long-read/long-write entry point** — rather than depend on internal behaviour, the transport uses plain single reads and writes, which behave identically across macOS, iOS, and Android. The device commits and saves only after all 15 chunks arrive and validate, so there is no half-written state; afterwards the server reads the config back and compares.
 
 ## Pairing
 

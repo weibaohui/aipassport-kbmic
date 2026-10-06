@@ -15,7 +15,7 @@
 
 ## 一、它做什么
 
-* 扫描并连上 `AI小键盘`,读出 1580 字节的配置(10 个 GATT 分片)并解析;
+* 扫描并连上 `AI小键盘`,读出 2300 字节的配置(15 个 GATT 分片)并解析;
 * 列出所有模式、每个模式三个键(上 / 下 / OK)各自的动作;
 * 新增 / 删除 / 改名模式,切换当前模式;
 * 给任意一个键(短按 / 长按)设动作:可以用内置预设,也可以给自定义步骤序列;
@@ -63,7 +63,7 @@ python3 -m pip install -r requirements.txt
 python3 /Users/weibh/Desktop/aipassport-kbmic/mcp_server/server.py --selftest
 ```
 
-打印协议布局自检结果(配置 1580 字节、8 个分片、目录与出厂默认一致性),不碰蓝牙。
+打印协议布局自检结果(配置 2300 字节、15 个分片、目录与出厂默认一致性),不碰蓝牙。
 
 单元测试(同样不需要硬件,也不需要装 bleak / mcp):
 
@@ -122,7 +122,7 @@ python3 -m unittest discover -s /Users/weibh/Desktop/aipassport-kbmic/mcp_server
 | `kbmic_set_key` | **核心**:给 (模式, 键, 槽) 设动作,可用预设或自定义步骤 |
 | `kbmic_reset_mode` | 把某个内置模式恢复出厂默认 |
 | `kbmic_reset_device` | 整机恢复出厂(4 个内置模式,当前模式 = 0) |
-| `kbmic_action_catalog` | 列出 16 个内置动作预设 |
+| `kbmic_action_catalog` | 列出 17 个内置动作预设 |
 | `kbmic_watch` | 订阅设备事件(start / status / stop) |
 
 所有工具都返回一个字典,含 `ok` 字段;失败时 `ok: false` 并带 `error` 文本。
@@ -168,6 +168,7 @@ id 与固件 `main/kbmic_action.c` 的 `ACT_*` 枚举同序,不要重排。
 | 13 | F1 | click | 1 × KEY(0x3A) |
 | 14 | F2 | click | 1 × KEY(0x3B) |
 | 15 | Settings | none | 软件动作:打开机身菜单,不发 HID 报告 |
+| 16 | Apple Fn (hold) | tap(按住) | 1 × APPLEFN(Fn；Apple Top Case) |
 
 ---
 
@@ -177,7 +178,7 @@ id 与固件 `main/kbmic_action.c` 的 `ACT_*` 枚举同序,不要重排。
 
 | 字段 | 说明 |
 | --- | --- |
-| `kind` | `0/none`、`1/key`、`2/consumer`、`3/delay` |
+| `kind` | `0/none`、`1/key`、`2/consumer`、`3/delay`、`4/applefn` |
 | `mods` | 位掩码,或 `"Ctrl+Shift"` 这样的字符串。bit0=Ctrl bit1=Shift bit2=Alt bit3=Win |
 | `keycode` | HID 键盘/ keypad 用法码(回车 0x28、Esc 0x29、退格 0x2A、Tab 0x2B、空格 0x2C、A-Z 0x04-0x1D、数字 0x1E-0x27、F1-F12 0x3A-0x45) |
 | `usage` | 16 位 Consumer 用法码(Globe = 0x029D) |
@@ -203,6 +204,7 @@ id 与固件 `main/kbmic_action.c` 的 `ACT_*` 枚举同序,不要重排。
   去掉尾部 `+`,如 `Ctrl+Win`;表外键码退化成 `0x%02X`;
 * `CONSUMER`:`0x029D` 显示 `Globe`,其余 `C:0x%04X`;
 * `DELAY`:`+%dms`;
+* `APPLEFN`:`Fn`;
 * 多步用单个空格连接;
 * 按住类(tap)追加 ` (hold)`;
 * 空动作或 `trigger=none` 显示 `-`;
@@ -214,30 +216,30 @@ id 与固件 `main/kbmic_action.c` 的 `ACT_*` 枚举同序,不要重排。
 
 ```
 Service        7d1c5a30-9f6e-4a21-8c3d-2b5e7a9f1c48
-Config chunk 0 7d1c5a40-…  read / write      共 10 个,前 9 个 160 字节
-Config chunk 9 7d1c5a49-…  read / write      第 10 个 140 字节
+Config chunk 0 7d1c5a40-…  read / write      共 15 个,前 14 个 160 字节
+Config chunk 14 7d1c5a4e-… read / write      第 15 个 60 字节
 Event          7d1c5a4f-…  read / notify
 ```
 
 * 固件**不支持 GATT long read/write**,所以服务端一律用普通的单次
-  read/write,按 0..9 顺序一格一格搬并自己拼接;
-* 写的时候 `response=True`,一格一次调用,顺序 0..9;
-* 设备收齐全部 10 格才会提交并落盘,校验不过就整份丢弃 —— 所以"写配置"永远是
-  写满 10 格,不存在只写一半的中间状态;
+  read/write,按 0..14 顺序一格一格搬并自己拼接;
+* 写的时候 `response=True`,一格一次调用,顺序 0..14;
+* 设备收齐全部 15 格才会提交并落盘,校验不过就整份丢弃 —— 所以"写配置"永远是
+  写满 15 格,不存在只写一半的中间状态;
 * 写完立刻读回来比对,不一致会把差异放在返回值里(`verified: false` + `mismatch`)。
 
-配置结构(小端、packed、无对齐空洞,共 1580 字节):
+配置结构(小端、packed、无对齐空洞,共 2300 字节):
 
 ```
-0    1  version  = 1
+0    1  version  = 3
 1    1  active   当前模式索引
 2    1  count    模式数量 1..8
 3    1  reserved
-4  1576 profiles[8]     每个 197 字节
+4  2296 profiles[8]     每个 287 字节
 ```
 
 模式 = 名字 16 字节(UTF-8,以 `\0` 结尾,内容最多 15 字节)+ builtin 1 字节 +
-`slots[3][2]`(3 个键 × 2 个槽),槽 = 30 字节(触发方式 + 步数 + 4 × 7 字节步骤)。
+`slots[3][3]`(3 个键 × 3 个槽),槽 = 30 字节(触发方式 + 步数 + 4 × 7 字节步骤)。
 
 事件报文:`type(1) + active(1) + aux(1) + reserved(1) + name_len(1) + name(n)`,
 `type` 为 0=BOOT / 1=CONFIG_SAVED / 2=KEY(KEY 时 `aux` 是按钮索引)。
@@ -249,9 +251,9 @@ Event          7d1c5a4f-…  read / notify
 ```
 mcp_server/
 ├── protocol.py      线协议:常量、偏移、编解码、校验、显示名、分片、事件解析(纯逻辑,无依赖)
-├── catalog.py       16 个内置预设 + 出厂默认 4 模式(镜像固件)
+├── catalog.py       17 个内置预设 + 出厂默认 4 模式(镜像固件)
 ├── ble.py           BLE 传输:扫描、连接、分片读写、事件订阅(惰性 import bleak)
-├── server.py        MCP stdio 服务与 12 个工具(import 时不碰蓝牙)
+├── server.py        MCP stdio 服务与设备端工具集(import 时不碰蓝牙)
 ├── test_protocol.py 单元测试(stdlib unittest,不需要硬件)
 ├── requirements.txt 依赖
 └── README.zh_CN.md  本文件(英文版见 README.md)

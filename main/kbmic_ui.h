@@ -22,5 +22,6 @@ void kbmic_nav_build(lv_obj_t *parent);     // 建页(框架容器)
 void kbmic_nav_poll(void);                  // 周期刷新
 bool kbmic_nav_key(int btn, int ev);        // 按键;返回 false 退回框架菜单
 
-// ---- 说话状态(主页大块显示;main 在按键回调里更新) ----
+// ---- 实时状态与按键反馈(main 在按键任务里更新,LVGL 线程安全快照) ----
 void kbmic_ui_set_voice(bool active, const char *btn_label);
+void kbmic_ui_set_feedback(const char *message, bool success);

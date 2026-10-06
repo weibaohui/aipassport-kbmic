@@ -26,17 +26,6 @@ static kbmic_step_t step_key(uint8_t mods, uint8_t keycode)
     };
 }
 
-static kbmic_step_t step_consumer(uint16_t usage)
-{
-    return (kbmic_step_t){
-        .kind = KBMIC_STEP_CONSUMER,
-        .mods = 0,
-        .keycode = 0,
-        .usage = usage,
-        .delay_ms = 0,
-    };
-}
-
 // 把若干步装配成一个 CLICK 动作。步数超上限时截断,多出来的静默丢掉。
 static kbmic_action_t action_click(const kbmic_step_t *steps, uint8_t n)
 {
@@ -74,33 +63,24 @@ static kbmic_action_t action_settings(void)
     return a;
 }
 
-// OK 长按留空:说话就是"按住 OK"(TAP 触发,按多久说多久),而长按阈值 500ms
-// 会在说话途中必然触发 —— 长按槽若再配设置,说话必被切断、设置突然弹出。
-// "进设置"因此默认放在 长按下键(见上),两者不打架;用户可经 MCP/网页改回。
-static kbmic_action_t action_none(void)
+// 所有平台档案共用同一套默认快捷键。
+// 注意:Apple Fn 使用厂商 usage,目前已在 Mac 实机验证;其它平台是否把该
+// usage 映射到系统语音入口取决于主机 OS/输入法,用户可通过 MCP 或网页改键。
+static void fill_common_slots(kbmic_profile_t *p)
 {
-    return (kbmic_action_t){0};
-}
-
-// 四个内置模式的公共键位:上=回车(长按连发三次)、下=退格(长按进设置)、
-// OK=语音(按平台不同,按住说话)。
-// 四模式统一键位(用户定稿 2026-10-06 三改):
-//   短按下=回车,双击下=Esc,短按 OK=退格,长按 OK=进设置,
-//   长按上=按住语音键说话(平台变体由 voice_step 传入),
-//   其余槽留空(用户可经 MCP/网页自定义)。
-static void fill_common_slots(kbmic_profile_t *p, kbmic_step_t voice_step)
-{
-    p->slots[KBMIC_BTN_UP][KBMIC_SLOT_TAP] = action_none();
-    p->slots[KBMIC_BTN_UP][KBMIC_SLOT_DOUBLE] = action_none();
-    p->slots[KBMIC_BTN_UP][KBMIC_SLOT_LONG] = action_tap(voice_step);
+    p->slots[KBMIC_BTN_UP][KBMIC_SLOT_TAP] = (kbmic_action_t){0};
+    p->slots[KBMIC_BTN_UP][KBMIC_SLOT_DOUBLE] = (kbmic_action_t){0};
+    p->slots[KBMIC_BTN_UP][KBMIC_SLOT_LONG] =
+        action_tap((kbmic_step_t){ .kind = KBMIC_STEP_APPLEFN });
     p->slots[KBMIC_BTN_DOWN][KBMIC_SLOT_TAP] =
         action_click((kbmic_step_t[]){step_key(0, KBMIC_HID_KEY_ENTER)}, 1);
     p->slots[KBMIC_BTN_DOWN][KBMIC_SLOT_DOUBLE] =
         action_click((kbmic_step_t[]){step_key(0, KBMIC_HID_KEY_ESCAPE)}, 1);
-    p->slots[KBMIC_BTN_DOWN][KBMIC_SLOT_LONG] = action_none();
+    p->slots[KBMIC_BTN_DOWN][KBMIC_SLOT_DOUBLE].trigger = KBMIC_TRIG_DOUBLE;
+    p->slots[KBMIC_BTN_DOWN][KBMIC_SLOT_LONG] = (kbmic_action_t){0};
     p->slots[KBMIC_BTN_OK][KBMIC_SLOT_TAP] =
         action_click((kbmic_step_t[]){step_key(0, KBMIC_HID_KEY_BACKSPACE)}, 1);
-    p->slots[KBMIC_BTN_OK][KBMIC_SLOT_DOUBLE] = action_none();
+    p->slots[KBMIC_BTN_OK][KBMIC_SLOT_DOUBLE] = (kbmic_action_t){0};
     p->slots[KBMIC_BTN_OK][KBMIC_SLOT_LONG] = action_settings();
 }
 
@@ -109,35 +89,19 @@ static void fill_common_slots(kbmic_profile_t *p, kbmic_step_t voice_step)
 // ---------------------------------------------------------------------------
 void kbmic_config_defaults(kbmic_config_t *cfg)
 {
+    static const char *const names[KBMIC_BUILTIN_MODES] = {
+        "Mac", "Windows", "Android", "iOS",
+    };
     memset(cfg, 0, sizeof(*cfg));
     cfg->version = KBMIC_CONFIG_VERSION;
     cfg->active = 0;
     cfg->count = KBMIC_BUILTIN_MODES;
 
-    // --- Mac:微信电脑版按住 Fn 触发语音 ---
-    strcpy(cfg->profiles[0].name, "Mac");
-    cfg->profiles[0].builtin = 1;
-    fill_common_slots(&cfg->profiles[0],
-                      (kbmic_step_t){ .kind = KBMIC_STEP_APPLEFN });   // Mac 语音 = Apple Fn 按住
-
-    // --- Windows:微信电脑版按住 Ctrl+Win ---
-    strcpy(cfg->profiles[1].name, "Windows");
-    cfg->profiles[1].builtin = 1;
-    fill_common_slots(&cfg->profiles[1],
-                      step_key(KBMIC_MOD_CTRL | KBMIC_MOD_GUI, 0));
-
-    // --- Android:微信输入法长按空格 ---
-    strcpy(cfg->profiles[2].name, "Android");
-    cfg->profiles[2].builtin = 1;
-    fill_common_slots(&cfg->profiles[2], step_key(0, KBMIC_HID_KEY_SPACE));
-
-    // --- iOS:先按 Globe 试 ---
-    // ⚠️ 未经实机验证。iOS 没有公开的第三方硬件键全局语音输入接口,
-    // 这里沿用 Globe(与 Mac 相同报文)作为尝试值,并保持完全可改。
-    // 实测不通就直接用 MCP 把这一档改成别的组合键,不必动固件。
-    strcpy(cfg->profiles[3].name, "iOS");
-    cfg->profiles[3].builtin = 1;
-    fill_common_slots(&cfg->profiles[3], step_consumer(KBMIC_HID_USAGE_GLOBE));
+    for (uint8_t i = 0; i < KBMIC_BUILTIN_MODES; i++) {
+        snprintf(cfg->profiles[i].name, sizeof(cfg->profiles[i].name), "%s", names[i]);
+        cfg->profiles[i].builtin = 1;
+        fill_common_slots(&cfg->profiles[i]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -197,6 +161,27 @@ bool kbmic_config_valid(const kbmic_config_t *cfg)
         }
     }
     return true;
+}
+
+bool kbmic_config_migrate_v2(kbmic_config_t *cfg)
+{
+    if (cfg == NULL || cfg->version != KBMIC_CONFIG_VERSION_PREVIOUS ||
+        cfg->count == 0 || cfg->count > KBMIC_MAX_PROFILES ||
+        cfg->active >= cfg->count || !name_ok(cfg->profiles[cfg->active].name)) {
+        return false;
+    }
+
+    kbmic_config_t defaults;
+    kbmic_config_defaults(&defaults);
+    const uint8_t builtin_count = (cfg->count < KBMIC_BUILTIN_MODES)
+                                      ? cfg->count
+                                      : KBMIC_BUILTIN_MODES;
+    for (uint8_t i = 0; i < builtin_count; i++) {
+        memcpy(cfg->profiles[i].slots, defaults.profiles[i].slots,
+               sizeof(cfg->profiles[i].slots));
+    }
+    cfg->version = KBMIC_CONFIG_VERSION;
+    return kbmic_config_valid(cfg);
 }
 
 // ---------------------------------------------------------------------------

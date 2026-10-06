@@ -79,9 +79,11 @@ static uint16_t s_evt_ccc;   // 事件特征的 CCC 值,非 0 表示已订阅(�
 static uint16_t s_handle[IDX_NB];
 static esp_gatts_attr_db_t s_attr[IDX_NB];
 static uint8_t s_chunk_len[KBMIC_SVC_CHUNKS];
+// CREAT_ATTR_TAB_EVT 的 handles 指向 BTC 内部静态数组，事件返回前必须深拷贝。
+static uint16_t s_created_handles[IDX_NB];
 
 // 写入暂存区。客户端把 N 个分片依次写进来,收齐且校验通过才提交。
-// 直接写生效存储的话,一次写到一半断连就会留下半份配置,而 1580 字节里任何一个
+// 直接写生效存储的话,一次写到一半断连就会留下半份配置,而 2300 字节里任何一个
 // 字节错了都足以让设备认不出自己配过什么。
 static kbmic_config_t s_staging;
 static uint32_t s_staging_mask;
@@ -213,40 +215,60 @@ static void svc_event(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
         }
         s_gatts_if = gatts_if;
         s_registered = true;
-        const esp_gatt_srvc_id_t svc = {
-            .id = {.uuid = s_uuid_svc, .inst_id = 0},
-            .is_primary = true,
-        };
-        esp_ble_gatts_create_service(gatts_if, (esp_gatt_srvc_id_t *)&svc, IDX_NB);
+        ESP_LOGI(TAG, "GATT app 注册成功 gatts_if=%u", gatts_if);
+        build_attr_table();
+        const esp_err_t create_ret = esp_ble_gatts_create_attr_tab(
+            s_attr, gatts_if, IDX_NB, 0);
+        if (create_ret != ESP_OK) {
+            ESP_LOGE(TAG, "创建属性表请求失败: %s", esp_err_to_name(create_ret));
+        }
         break;
 
     case ESP_GATTS_CREATE_EVT:
+        // 该事件只属于 create_service() 流程；属性表服务不会走到这里。
         if (param->create.status != ESP_GATT_OK) {
             ESP_LOGE(TAG, "创建服务失败: %d", param->create.status);
             return;
         }
-        build_attr_table();
-        esp_ble_gatts_create_attr_tab(s_attr, gatts_if, IDX_NB, 0);
         break;
 
     case ESP_GATTS_CREAT_ATTR_TAB_EVT: {
         // 句柄只在这一步才拿得到,必须整段拷出来:param->handles 是协议栈的临时
         // 缓冲,事件返回后就没了。
         if (param->add_attr_tab.status != ESP_GATT_OK) {
-            ESP_LOGE(TAG, "建表失败: %d", param->add_attr_tab.status);
+            ESP_LOGE(TAG, "建表失败: status=%d gatts_if=%u num=%u",
+                     param->add_attr_tab.status, gatts_if,
+                     param->add_attr_tab.num_handle);
             return;
         }
         const uint16_t got = param->add_attr_tab.num_handle;
+        ESP_LOGI(TAG, "属性表就绪 num=%u svc_handle=%u first=%u last=%u",
+                 got, param->add_attr_tab.handles[0],
+                 param->add_attr_tab.handles[0],
+                 param->add_attr_tab.handles[got ? got - 1 : 0]);
         for (uint16_t i = 0; i < got && i < IDX_NB; i++) {
             s_handle[i] = param->add_attr_tab.handles[i];
         }
-        esp_ble_gatts_start_service(s_handle[IDX_SVC]);
+        if (got != IDX_NB) {
+            ESP_LOGE(TAG, "属性表数量异常: got=%u expected=%u", got, IDX_NB);
+            return;
+        }
+        const esp_err_t start_ret = esp_ble_gatts_start_service(s_handle[IDX_SVC]);
+        if (start_ret != ESP_OK) {
+            ESP_LOGE(TAG, "启动配置服务失败: %s", esp_err_to_name(start_ret));
+        }
         break;
     }
 
     case ESP_GATTS_START_EVT:
-        ESP_LOGI(TAG, "配置服务就绪:%u 个分片 × %u 字节 = %u 字节",
-                 KBMIC_SVC_CHUNKS, KBMIC_SVC_CHUNK_SIZE, KBMIC_CONFIG_SIZE);
+        if (param->start.status == ESP_GATT_OK) {
+            ESP_LOGI(TAG, "配置服务就绪 handle=%u:%u 个分片 × %u 字节 = %u 字节",
+                     param->start.service_handle, KBMIC_SVC_CHUNKS,
+                     KBMIC_SVC_CHUNK_SIZE, KBMIC_CONFIG_SIZE);
+        } else {
+            ESP_LOGE(TAG, "配置服务启动事件失败: status=%d handle=%u",
+                     param->start.status, param->start.service_handle);
+        }
         break;
 
     case ESP_GATTS_CONNECT_EVT:
@@ -365,6 +387,15 @@ static void dispatch(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
         return;
     }
     memcpy(copy, param, sizeof(*copy));
+    if (event == ESP_GATTS_CREAT_ATTR_TAB_EVT) {
+        const uint16_t count = param->add_attr_tab.num_handle;
+        if (param->add_attr_tab.handles != NULL) {
+            memcpy(s_created_handles, param->add_attr_tab.handles,
+                   count < IDX_NB ? count * sizeof(s_created_handles[0])
+                                  : sizeof(s_created_handles));
+        }
+        copy->add_attr_tab.handles = s_created_handles;
+    }
     const svc_msg_t msg = {.event = event, .gatts_if = gatts_if, .param = copy};
     xQueueSend(s_svc_queue, &msg, 0);
 }

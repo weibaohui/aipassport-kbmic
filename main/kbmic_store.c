@@ -64,6 +64,15 @@ esp_err_t kbmic_config_load(void)
                          s_current.profiles[s_current.active].name);
                 return ESP_OK;
             }
+            // v2/v3 布局相同，迁移在纯模型里做，便于主机测试验证保留范围。
+            if (len == sizeof(tmp) && kbmic_config_migrate_v2(&tmp)) {
+                s_current = tmp;
+                const esp_err_t save_ret = kbmic_config_save(&s_current);
+                ESP_LOGI(TAG, "配置已迁移 v%u→v%u，统一四个平台默认键位%s",
+                         KBMIC_CONFIG_VERSION_PREVIOUS, KBMIC_CONFIG_VERSION,
+                         save_ret == ESP_OK ? "并保留自定义模式" : "；NVS 保存待重试");
+                return ESP_OK;
+            }
             ESP_LOGW(TAG, "NVS 里的配置无效(版本/长度/字段),改用默认值");
         } else if (ret != ESP_ERR_NVS_NOT_FOUND) {
             ESP_LOGE(TAG, "读 NVS 失败: %s", esp_err_to_name(ret));

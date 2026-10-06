@@ -5,7 +5,7 @@
 没有蓝牙栈的机器上也能被导入和测试。
 
 固件不支持 GATT long read/write,所以这里一律用最普通的单次 read_gatt_char /
-write_gatt_char,按 0..9 顺序一格一格搬,不使用 read_long / write_long /
+write_gatt_char,按 0..14 顺序一格一格搬,不使用 read_long / write_long /
 Prepare Write 之类的长写辅助。
 """
 
@@ -237,18 +237,19 @@ async def connected(address: str | None = None, timeout: float = 20.0):
 
 
 async def _resolve_chars(client, address: str) -> tuple[list, object]:
-    """把 10 个分片特征和一个事件特征找出来。找不到就报清楚缺哪个。"""
+    """把 15 个分片特征和一个事件特征找出来。找不到就报清楚缺哪个。"""
     missing: list[str] = []
     chunks = []
     for i in range(P.CHUNK_COUNT):
         uuid = P.chunk_uuid(i)
-        chars = client.services.get_characteristics(uuid)
-        if not chars:
+        char = client.services.get_characteristic(uuid)
+        if char is None:
             missing.append(uuid)
         else:
-            chunks.append(chars[0])
+            chunks.append(char)
     evt_chars = client.services.get_characteristics(P.EVENT_UUID)
-    if missing or not evt_chars:
+    evt_char = client.services.get_characteristic(P.EVENT_UUID)
+    if missing or evt_char is None:
         if missing:
             raise BleError(
                 f"设备 {address} 上找不到配置分片特征 {missing} —— "
@@ -256,7 +257,7 @@ async def _resolve_chars(client, address: str) -> tuple[list, object]:
                 f"{P.SERVICE_UUID}。\n"
                 "多半是固件版本不匹配:请用与本 MCP 服务端同一份固件重新烧录。"
             )
-    return chunks, evt_chars[0]
+    return chunks, evt_char
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +265,7 @@ async def _resolve_chars(client, address: str) -> tuple[list, object]:
 # ---------------------------------------------------------------------------
 
 async def read_blob(client) -> bytes:
-    """按 0..9 顺序读全部分片并拼回 1580 字节。"""
+    """按协议分片顺序读取并拼回完整配置。"""
     chunks, _evt = await _resolve_chars(client, getattr(client, "address", "?"))
     parts: list[bytes] = []
     for i, char in enumerate(chunks):
@@ -276,7 +277,7 @@ async def read_blob(client) -> bytes:
 
 
 async def write_blob(client, blob: bytes) -> None:
-    """写全 10 片(带响应),0..9 顺序。设备收齐后才会提交并落盘。"""
+    """写全 15 片(带响应),0..14 顺序。设备收齐后才会提交并落盘。"""
     if len(blob) != P.CONFIG_SIZE:
         raise ProtocolError(f"待写入的配置必须是 {P.CONFIG_SIZE} 字节,收到 {len(blob)} 字节")
     chunks, _evt = await _resolve_chars(client, getattr(client, "address", "?"))
@@ -293,7 +294,7 @@ async def read_config(address: str | None = None) -> "P.Config":
 
 
 async def write_config(cfg: "P.Config", address: str | None = None) -> "P.Config":
-    """校验 → 写全 10 片 → 读回确认。返回读回来的那份配置。"""
+    """校验 → 写全 15 片 → 读回确认。返回读回来的那份配置。"""
     cfg.validate()
     blob = cfg.encode()
     async with connected(address) as (client, _addr):

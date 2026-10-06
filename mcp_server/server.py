@@ -4,8 +4,8 @@
 设计约束:
   * import 本模块**不碰蓝牙**。bleak 只在真正调用工具时才被 import,
     所以这个文件可以被静态检查、可以被单元测试导入、可以先起起来再插硬件。
-  * 所有写操作都是「读 → 改内存 → 校验 → 写全 10 片 → 读回比对」,
-    因为固件收齐 10 片才提交,只写一部分等于没写。
+  * 所有写操作都是「读 → 改内存 → 校验 → 写全 15 片 → 读回比对」,
+    因为固件收齐 15 片才提交,只写一部分等于没写。
   * 设备不可达时返回可操作的排查提示,而不是裸异常。
 
 独立自检(不碰蓝牙):
@@ -153,7 +153,7 @@ async def kbmic_list_devices(timeout: float = 10.0, pin: str | None = None) -> d
 
 @mcp.tool()
 async def kbmic_get_config(address: str | None = None) -> dict:
-    """读取设备完整配置(10 个分片拼成 1580 字节后解析)。
+    """读取设备完整配置(读取全部 GATT 分片后解析)。
 
     返回每个模式的完整按键表:三个键 × (短按/长按) × 最多 4 步,
     每个动作都带一个由步骤反推出来的可读名字(如 "Ctrl+Win (hold)")。
@@ -319,9 +319,9 @@ async def kbmic_set_key(
     Args:
         index: 模式索引。
         button: Up / Down / OK(或 0/1/2)。
-        slot: short-tap / long-press(或 0/1),默认短按。
+        slot: short-tap / double-click / long-press(或 0/1/2),默认短按。
         preset: 目录里的动作 id 或名字,与 steps 互斥。
-        trigger: 覆盖预设的触发方式(none/click/tap/long);仅在用 preset 或 steps 时有效。
+        trigger: 覆盖预设的触发方式(none/click/tap/long/double);仅在用 preset 或 steps 时有效。
         steps: 自定义步骤数组,与 preset 互斥。
         address: 设备地址,不传则用已固定的地址。
     """
@@ -517,7 +517,7 @@ async def kbmic_watch(action: str = "start", duration: float = 10.0,
 # ---------------------------------------------------------------------------
 
 def _selftest() -> int:
-    """不碰蓝牙的自检:布局算术 + 出厂配置 1580 字节 + 目录一致。"""
+    """不碰蓝牙的自检:布局算术 + 出厂配置长度 + 目录一致。"""
     import json
     out = {"protocol": P.self_check(), "catalog": catalog.self_check()}
     print(json.dumps(out, indent=2, ensure_ascii=False))

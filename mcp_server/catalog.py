@@ -151,7 +151,9 @@ def lookup(spec) -> CatalogItem:
     if isinstance(spec, CatalogItem):
         return spec
     if isinstance(spec, bool):
-        raise ProtocolError("动作预设必须是 id(0..15)或名字,例如 1 或 'Enter'")
+        raise ProtocolError(
+            f"动作预设必须是 id(0..{len(CATALOG) - 1})或名字,例如 1 或 'Enter'"
+        )
     if isinstance(spec, int):
         if spec in CATALOG_BY_ID:
             return CATALOG_BY_ID[spec]
@@ -197,39 +199,27 @@ def match_catalog(action: Action) -> int | None:
 # 和固件自己重建出来的结果完全相同。
 # ---------------------------------------------------------------------------
 
-def _enter_triple() -> Action:
-    return action_click(step_key(KEY_ENTER), step_key(KEY_ENTER), step_key(KEY_ENTER))
-
-
 def _default_builtin_profiles() -> list[Profile]:
-    def blank() -> list[list[Action]]:
-        return [[Action() for _ in range(P.SLOT_COUNT)] for _ in range(P.BTN_COUNT)]
-
-    def fill(prof: Profile, voice_step: Step) -> Profile:
-        # 四模式统一键位(用户定稿 2026-10-06 三改):
-        # 短按下=回车,双击下=Esc,短按OK=退格,长按OK=进设置,
-        # 长按上=按住语音键(voice_step 平台变体),其余槽留空。
+    # 四个平台档案共享相同默认快捷键。Fn 是 Apple Top Case usage；非 Apple
+    # 系统可能不把它映射为语音入口，但用户仍可经 MCP/HTTP 调整各档案。
+    profiles = [
+        Profile(name=name, builtin=1,
+                slots=[[Action() for _ in range(P.SLOT_COUNT)] for _ in range(P.BTN_COUNT)])
+        for name in ("Mac", "Windows", "Android", "iOS")
+    ]
+    for prof in profiles:
         prof.set_slot(P.BTN_UP, P.SLOT_TAP, action_none())
         prof.set_slot(P.BTN_UP, P.SLOT_DOUBLE, action_none())
-        prof.set_slot(P.BTN_UP, P.SLOT_LONG, action_tap(voice_step))
+        prof.set_slot(P.BTN_UP, P.SLOT_LONG, action_tap(Step(kind=STEP_APPLEFN)))
         prof.set_slot(P.BTN_DOWN, P.SLOT_TAP, action_click(step_key(KEY_ENTER)))
-        prof.set_slot(P.BTN_DOWN, P.SLOT_DOUBLE, action_click(step_key(0x29)))   # Esc
+        cancel = action_click(step_key(KEY_ESCAPE))
+        cancel.trigger = P.TRIGGER_DOUBLE
+        prof.set_slot(P.BTN_DOWN, P.SLOT_DOUBLE, cancel)
         prof.set_slot(P.BTN_DOWN, P.SLOT_LONG, action_none())
         prof.set_slot(P.BTN_OK, P.SLOT_TAP, action_click(step_key(KEY_BACKSPACE)))
         prof.set_slot(P.BTN_OK, P.SLOT_DOUBLE, action_none())
         prof.set_slot(P.BTN_OK, P.SLOT_LONG, action_settings())
-        return prof
-
-    mac = fill(Profile(name="Mac", builtin=1, slots=blank()),
-               Step(kind=STEP_APPLEFN))   # Mac 语音 = Apple Fn 按住
-    windows = fill(Profile(name="Windows", builtin=1, slots=blank()),
-                   step_key(0, MOD_CTRL_GUI))
-    android = fill(Profile(name="Android", builtin=1, slots=blank()),
-                   step_key(KEY_SPACE))
-    # iOS 与 Mac 相同(发 Globe)。固件注释已标明:未经实机验证,不通就直接用 MCP 改。
-    ios = fill(Profile(name="iOS", builtin=1, slots=blank()),
-               step_consumer(USAGE_GLOBE))
-    return [mac, windows, android, ios]
+    return profiles
 
 
 def builtin_profile_defaults(index: int) -> Profile:
@@ -244,7 +234,7 @@ def builtin_profile_defaults(index: int) -> Profile:
 
 
 def factory_default_config() -> Config:
-    """整份出厂默认:4 个内置模式,active=0。必须正好 1580 字节。"""
+    """整份出厂默认:4 个内置模式,active=0。必须正好 P.CONFIG_SIZE 字节。"""
     profiles = _default_builtin_profiles()
     cfg = Config(version=P.CONFIG_VERSION, active=0,
                  count=P.BUILTIN_MODES, reserved=0, profiles=profiles)
@@ -256,16 +246,18 @@ def factory_default_config() -> Config:
 def self_check() -> dict:
     """目录与出厂默认的一致性自检(protocol.self_check() 会顺带调用)。"""
     assert [item.id for item in CATALOG] == list(range(len(CATALOG))), "目录 id 必须连续"
-    assert len(CATALOG) == 16, "固件 s_catalog 有 16 项"
+    assert len(CATALOG) == 17, "固件 s_catalog 有 17 项"
     for item in CATALOG:
         item.action.validate()
     cfg = factory_default_config()
     assert cfg.count == P.BUILTIN_MODES and cfg.active == 0
     assert [p.name for p in cfg.live_profiles()] == ["Mac", "Windows", "Android", "iOS"]
-    assert P.action_name(cfg.profiles[0].get_slot(P.BTN_OK, P.SLOT_TAP)) == "Globe (hold)"
-    assert P.action_name(cfg.profiles[1].get_slot(P.BTN_OK, P.SLOT_TAP)) == "Ctrl+Win (hold)"
-    assert P.action_name(cfg.profiles[0].get_slot(P.BTN_UP, P.SLOT_LONG)) == "Enter Enter Enter"
-    assert P.action_name(cfg.profiles[0].get_slot(P.BTN_DOWN, P.SLOT_LONG)) == "Settings"
+    for profile in cfg.live_profiles():
+        assert P.action_name(profile.get_slot(P.BTN_DOWN, P.SLOT_TAP)) == "Enter"
+        assert P.action_name(profile.get_slot(P.BTN_DOWN, P.SLOT_DOUBLE)) == "Esc"
+        assert P.action_name(profile.get_slot(P.BTN_OK, P.SLOT_TAP)) == "Back"
+        assert P.action_name(profile.get_slot(P.BTN_OK, P.SLOT_LONG)) == "Settings"
+        assert P.action_name(profile.get_slot(P.BTN_UP, P.SLOT_LONG)) == "Fn (hold)"
     return {
         "catalog_items": len(CATALOG),
         "default_bytes": len(cfg.encode()),

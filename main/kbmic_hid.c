@@ -1,14 +1,8 @@
-// main/kbmic_hid.c —— BLE HID 设备实现。
-//
-// 分三层:
-//   1. esp_hid 组件的 BLE 传输层负责 HID 服务(0x1812)、报告特征与电量服务;
-//   2. 本文件自带的 GAP 薄层负责 BT controller / Bluedroid 启动、配对与广播
-//      (官方例程里叫 esp_hid_gap.c,但那份同时含经典蓝牙扫描与 HID host,
-//       本应用只需要广播这一侧,所以只取必要部分自己写);
-//   3) 对外发送 8 字节键盘报告(第 2 字节为 Apple Fn)。
+// main/kbmic_hid.c —— BLE HID keyboard (8-byte keyboard + Consumer Control map).
 #include "kbmic_hid.h"
-
 #include "kbmic_config.h"
+#include "kbmic_ble_svc.h"
+#include "kbmic_store.h"
 
 #include <inttypes.h>
 #include <string.h>
@@ -27,113 +21,50 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-// 设备名即产品名,用户在手机/电脑的蓝牙列表里看到的就是它。
-// 定义在 kbmic_config.h —— 那里是配置模型的单一定义处,别在这里再抄一份。
 #define KBMIC_BLE_DEVICE_NAME KBMIC_BT_NAME
 #define KBMIC_BLE_MANUFACTURER "FoloToy"
 #define KBMIC_BLE_SERIAL "AIKB0001"
-
-// 设备名 "AI小键盘" 的 UTF-8 是 11 字节,加上 flags + appearance 会超过
-// 31 字节的广播包。所以广播包只放 16 位 HID 服务 UUID(0x1812),名字走
-// scan response。
-//
-// ⚠️ esp_ble_gap_config_adv_data 的 service_uuid 字段有两个反直觉的约定:
-//   1. p_service_uuid 是**每 16 字节一格**的数组,步长固定 LEN_UUID_128,
-//      不是紧凑的 2 字节数组。下游用 btc128_to_bta_uuid() 逐格解析,
-//      service_uuid_len 必须是 16 的倍数。
-//   2. 16 位与否由 uuidType() 判定:非 [12][13] 的 12 个字节必须与标准
-//      BASE_UUID 完全一致才判成 16 位(此时 uuid16 = [13]<<8|[12])。
-//      把值放在 [0][1] 会被判成 128 位自定义 UUID → 18 字节 AD 字段,
-//      广播包超 31 字节,BTM 只写入部分数据且广播出去的是错误 UUID
-//      (2026-10-05 真机踩坑,日志表现为 "Partial data write into ADV")。
-// 所以下面是 0x1812 的规范小端 128 位布局:BASE_UUID 前 12 字节 +
-// 0x12、0x18 放在 [12][13],末尾两字节补零。
-#define KBMIC_HID_SERVICE_UUID16 0x1812
-#define KBMIC_SVC_UUID_SLOT 16
-static const uint8_t s_hid_service_uuid[KBMIC_SVC_UUID_SLOT] = {
-    0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,   // BASE_UUID 前 8 字节
-    0x00, 0x10, 0x00, 0x00,                            // 后 4 字节
-    KBMIC_HID_SERVICE_UUID16 & 0xFF,         // [12] = 0x12 → uuid16 低位
-    (KBMIC_HID_SERVICE_UUID16 >> 8) & 0xFF,  // [13] = 0x18 → uuid16 高位
-    0, 0,
-};
-
-// HID 报告引脚:按下保持时长。低于 30ms 少数主机会漏掉这一击,高于 60ms
-// 用户会感到"粘",20ms 是通用取值。
-#define KBMIC_TAP_HOLD_MS 20
+#define KBMIC_TAP_HOLD_MS 35
+#define KBMIC_MAP_KEYBOARD 0
+#define KBMIC_MAP_CONSUMER 1
 
 static const char *TAG = "kbmic_hid";
 
-// ---------------------------------------------------------------------------
-// 报告描述符
-// ---------------------------------------------------------------------------
-
-// 唯一报告映射：8 字节键盘报告，依次为 modifier、Apple Fn、6 个键码。
-// 本调试固件不声明 Report ID，输入报告在键盘特征中直接发送 8 字节。
+// 键盘输入布局固定 8 字节:[modifier][Apple Fn][6 keycodes]。
 static const uint8_t s_map_keyboard[] = {
-    0x05, 0x01,        // Usage Page (Generic Desktop)
-    0x09, 0x06,        // Usage (Keyboard)
-    0xA1, 0x01,        // Collection (Application)
-    0x05, 0x07,        //   Usage Page (Key Codes)
+    0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, // Generic Desktop / Keyboard / Application
+    0x05, 0x07,                           // Keyboard/Keypad Usage Page
+    0x19, 0xE0, 0x29, 0xE7,              // modifier usage range
+    0x15, 0x00, 0x25, 0x01,
+    0x75, 0x01, 0x95, 0x08, 0x81, 0x02, // 8 modifier bits
+    0x05, 0xFF, 0x09, 0x03,              // Apple Top Case / KeyboardFn
+    0x15, 0x00, 0x25, 0x01,
+    0x75, 0x08, 0x95, 0x01, 0x81, 0x02, // byte 1 = Fn
+    0x05, 0x07,                           // restore standard key usage page!
+    0x95, 0x06, 0x75, 0x08,
+    0x15, 0x00, 0x25, 0xDD, 0x19, 0x00, 0x29, 0xDD,
+    0x81, 0x00,                           // six keycodes
+    0x05, 0x08, 0x19, 0x01, 0x29, 0x05,
+    0x75, 0x01, 0x95, 0x05, 0x91, 0x02, // LED output
+    0x75, 0x03, 0x95, 0x01, 0x91, 0x03,
+    0xC0,
+};
 
-    0x19, 0xE0,        //   Usage Minimum (224 = LeftControl)
-    0x29, 0xE7,        //   Usage Maximum (231 = RightGUI)
-    0x15, 0x00,        //   Logical Minimum (0)
-    0x25, 0x01,        //   Logical Maximum (1)
-    0x75, 0x01,        //   Report Size (1)
-    0x95, 0x08,        //   Report Count (8)
-    0x81, 0x02,        //   Input (Data,Var,Abs)      -> 修饰键字节
-
-    0x05, 0xFF,        //   Usage Page (AppleVendor Top Case)
-    0x09, 0x03,        //   Usage (KeyboardFn)
-    0x15, 0x00,        //   Logical Minimum (0)
-    0x25, 0x01,        //   Logical Maximum (1)
-    0x75, 0x08,        //   Report Size (8)
-    0x95, 0x01,        //   Report Count (1)
-    0x81, 0x02,        //   Input (Data,Var,Abs)       -> Apple Fn 字节(报告第 2 字节)
-
-    // 这里**不能**再插 5 bit + 3 bit 的填充项:modifiers + Fn + 6 keys 已经是
-    // 8 字节。多加填充会让 esp_hid 描述符解析器拒绝或产生错误报告长度。
-
-    // Apple Fn 改用了 vendor usage page 0xFF；切回标准键盘 usage page，
-    // 否则下面的 0x28/0x2A 会被解释为厂商自定义 usage，macOS 不会产生按键。
-    0x05, 0x07,        //   Usage Page (Key Codes)
-    0x95, 0x06,        //   Report Count (6)
-    0x75, 0x08,        //   Report Size (8)
-    0x15, 0x00,        //   Logical Minimum (0)
-    0x25, 0xDD,        //   Logical Maximum (221)
-    0x19, 0x00,        //   Usage Minimum (0)
-    0x29, 0xDD,        //   Usage Maximum (221)
-    0x81, 0x00,        //   Input (Data,Array)        -> 6 个键码
-
-    0x05, 0x08,        //   Usage Page (LEDs)
-    0x19, 0x01,        //   Usage Minimum (1 = NumLock)
-    0x29, 0x05,        //   Usage Maximum (5 = Kana)
-    0x75, 0x01,        //   Report Size (1)
-    0x95, 0x05,        //   Report Count (5)
-    0x91, 0x02,        //   Output (Data,Var,Abs)     -> 主机发来的 LED 状态
-    //                        ↑ 必须是 0x91(Output),不是 0x81(Input)。写成 0x81
-    //                          会把这 5 bit 算进 Input 报告,Input 变成 69 bit
-    //                          而非 64 bit —— 同样表现为解析失败 + panic 重启。
-
-    0x75, 0x03,        //   Report Size (3)
-    0x95, 0x01,        //   Report Count (1)
-    0x91, 0x03,        //   Output (Cnst,Var,Abs)     -> 3 bit 填充
-
-    0xC0               // End Collection
+// Consumer 控制图:自定义快捷键仍可配置 Globe (0x029D) 与媒体键。
+static const uint8_t s_map_consumer[] = {
+    0x05, 0x0C, 0x09, 0x01, 0xA1, 0x01,
+    0x15, 0x00, 0x26, 0xFF, 0x03,
+    0x19, 0x00, 0x2A, 0xFF, 0x03,
+    0x75, 0x10, 0x95, 0x01, 0x81, 0x00,
+    0xC0,
 };
 
 static esp_hid_raw_report_map_t s_report_maps[] = {
-    { .data = s_map_keyboard, .len = sizeof(s_map_keyboard) },
+    {.data = s_map_keyboard, .len = sizeof(s_map_keyboard)},
+    {.data = s_map_consumer, .len = sizeof(s_map_consumer)},
 };
 
-#define KBMIC_MAP_KEYBOARD 0
-
 static esp_hid_device_config_t s_hid_config = {
-    // 仿冒 Apple Magic Keyboard(与 Keychron Mac 模式同款做法):macOS 对
-    // 原生 ID 走完整键盘路径(Fn/Globe/全部按键);自造 VID/PID 曾被当
-    // 杂牌键盘处理,服务识别正常但输入事件被吞(2026-10-06 真机对照:
-    // 同 Mac 上 Keychron 以此 ID 工作正常)。
     .vendor_id = 0x05AC,
     .product_id = 0x024F,
     .version = 0x0100,
@@ -146,11 +77,7 @@ static esp_hid_device_config_t s_hid_config = {
 
 static esp_hidd_dev_t *s_hid_dev;
 static bool s_connected;
-
-// ---------------------------------------------------------------------------
-// GAP 薄层:广播与配对
-// ---------------------------------------------------------------------------
-static void gap_ble_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param);
+static bool s_boot_notify;
 
 static void gap_adv_start(void)
 {
@@ -162,197 +89,105 @@ static void gap_adv_start(void)
         .channel_map = ADV_CHNL_ALL,
         .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
     };
-    esp_ble_gap_start_advertising(&adv_params);
-}
-
-static esp_err_t gap_ble_init(void)
-{
-    esp_err_t ret;
-
-    // 键盘要能配对加密(主机要求),并且要有 IO 能力以完成 MITM。
-    const esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
-    const esp_ble_io_cap_t iocap = ESP_IO_CAP_IO;
-    const uint8_t enc_key_mask = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
-    const uint8_t key_size = 16;
-
-    if ((ret = esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, 1)) != ESP_OK ||
-        (ret = esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, 1)) != ESP_OK ||
-        (ret = esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &enc_key_mask, 1)) != ESP_OK ||
-        (ret = esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &enc_key_mask, 1)) != ESP_OK ||
-        (ret = esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, 1)) != ESP_OK) {
-        ESP_LOGE(TAG, "安全参数设置失败: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    if ((ret = esp_ble_gap_register_callback(gap_ble_event)) != ESP_OK) {
-        ESP_LOGE(TAG, "GAP 回调注册失败: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    if ((ret = esp_ble_gap_set_device_name(KBMIC_BLE_DEVICE_NAME)) != ESP_OK) {
-        ESP_LOGE(TAG, "设备名设置失败: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    // 广播包:flags + appearance + txpower + 16 位 HID 服务 UUID。
-    // 名字塞不下(11 字节 UTF-8 + 其它字段会超 31),走 scan response。
-    const esp_ble_adv_data_t adv_data = {
-        .set_scan_rsp = false,
-        .include_name = false,
-        .include_txpower = true,
-        .min_interval = 0x0006,  // 7.5ms
-        .max_interval = 0x0010,  // 20ms
-        .appearance = ESP_HID_APPEARANCE_KEYBOARD,
-        .service_uuid_len = sizeof(s_hid_service_uuid),   // 16,必须是 16 的倍数
-        .p_service_uuid = (uint8_t *)s_hid_service_uuid,
-        .flag = 0x6,
-    };
-    if ((ret = esp_ble_gap_config_adv_data(&adv_data)) != ESP_OK) {
-        ESP_LOGE(TAG, "广播数据配置失败: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    // scan response 只放名字。appearance 已经在广播包里了,再放一遍纯属浪费
-    // 那 31 字节里最紧张的位置,留给更长的名字更划算。
-    const esp_ble_adv_data_t scan_rsp = {
-        .set_scan_rsp = true,
-        .include_name = true,     // 设备名("AI小键盘",11 字节 UTF-8)走这里
-        .include_txpower = false,
-    };
-    if ((ret = esp_ble_gap_config_adv_data(&scan_rsp)) != ESP_OK) {
-        ESP_LOGE(TAG, "扫描响应配置失败: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    return ESP_OK;
-}
-
-static esp_err_t gap_stack_init(void)
-{
-    esp_err_t ret;
-
-    // IDF 5.5 里 esp_bt_controller_config_t 没有 mode 字段了(5.2 之前有)。
-    // 纯 BLE 由 sdkconfig 的 CONFIG_BT_CTRL_MODE_BLE_ONLY=y 决定,配置本身
-    // 直接用默认宏,这也是官方 esp_hid_device 例程的写法。
-    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-    if ((ret = esp_bt_controller_init(&bt_cfg)) != ESP_OK) {
-        ESP_LOGE(TAG, "BT controller 初始化失败: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    if ((ret = esp_bt_controller_enable(ESP_BT_MODE_BLE)) != ESP_OK) {
-        ESP_LOGE(TAG, "BT controller 使能失败: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    // IDF 5.5 拆成了两个入口:esp_bluedroid_init(void) 用默认配置,
-    // esp_bluedroid_init_with_cfg(cfg) 才收参数。ssp_en/sc_en 都是经典蓝牙的
-    // 配对开关,BLE 侧由上面的安全参数决定,这里照默认走。
-    esp_bluedroid_config_t bd_cfg = BT_BLUEDROID_INIT_CONFIG_DEFAULT();
-    if ((ret = esp_bluedroid_init_with_cfg(&bd_cfg)) != ESP_OK) {
-        ESP_LOGE(TAG, "Bluedroid 初始化失败: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    if ((ret = esp_bluedroid_enable()) != ESP_OK) {
-        ESP_LOGE(TAG, "Bluedroid 使能失败: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    return gap_ble_init();
+    (void)esp_ble_gap_start_advertising((esp_ble_adv_params_t *)&adv_params);
 }
 
 static void gap_ble_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
 {
     switch (event) {
     case ESP_GAP_BLE_AUTH_CMPL_EVT:
-        if (!param->ble_security.auth_cmpl.success) {
-            ESP_LOGE(TAG, "配对失败,原因 0x%x", param->ble_security.auth_cmpl.fail_reason);
-        } else {
-            ESP_LOGI(TAG, "配对成功");
-        }
+        ESP_LOGI(TAG, "配对%s", param->ble_security.auth_cmpl.success ? "成功" : "失败");
         break;
     case ESP_GAP_BLE_NC_REQ_EVT:
-        // 本机无屏幕,直接确认数字配对码比对;真实产品可改为把 passkey 显示到屏上。
-        ESP_LOGI(TAG, "数字配对码 %" PRIu32, param->ble_security.key_notif.passkey);
+        ESP_LOGI(TAG, "配对码 %" PRIu32 ",自动确认", param->ble_security.key_notif.passkey);
         esp_ble_confirm_reply(param->ble_security.ble_req.bd_addr, true);
-        break;
-    case ESP_GAP_BLE_PASSKEY_NOTIF_EVT:
-        // 主机在等本机输入 passkey。本机没有输入数字键盘,交给上层提示,
-        // 这里只把码打出来,避免静默卡在配对流程。
-        ESP_LOGW(TAG, "主机请求输入配对码: %" PRIu32, param->ble_security.key_notif.passkey);
         break;
     case ESP_GAP_BLE_SEC_REQ_EVT:
         esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
         break;
+    case ESP_GAP_BLE_PASSKEY_NOTIF_EVT:
+        ESP_LOGW(TAG, "主机请求输入配对码:%" PRIu32, param->ble_security.key_notif.passkey);
+        break;
     default:
         break;
     }
 }
 
-// ---------------------------------------------------------------------------
-// HID 事件
-// ---------------------------------------------------------------------------
+static esp_err_t gap_stack_init(void)
+{
+    esp_err_t ret;
+    esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
+    esp_ble_io_cap_t iocap = ESP_IO_CAP_IO;
+    uint8_t enc_key_mask = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+    uint8_t key_size = 16;
+
+    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    ret = esp_bt_controller_init(&bt_cfg);
+    if (ret != ESP_OK) return ret;
+    ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+    if (ret != ESP_OK) return ret;
+    esp_bluedroid_config_t bd_cfg = BT_BLUEDROID_INIT_CONFIG_DEFAULT();
+    ret = esp_bluedroid_init_with_cfg(&bd_cfg);
+    if (ret != ESP_OK) return ret;
+    ret = esp_bluedroid_enable();
+    if (ret != ESP_OK) return ret;
+
+    if ((ret = esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, 1)) != ESP_OK ||
+        (ret = esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, 1)) != ESP_OK ||
+        (ret = esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &enc_key_mask, 1)) != ESP_OK ||
+        (ret = esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &enc_key_mask, 1)) != ESP_OK ||
+        (ret = esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, 1)) != ESP_OK) {
+        ESP_LOGE(TAG, "BLE 安全参数设置失败: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    if ((ret = esp_ble_gap_register_callback(gap_ble_event)) != ESP_OK) return ret;
+    return esp_ble_gap_set_device_name(KBMIC_BLE_DEVICE_NAME);
+}
+
 static void hid_event_cb(void *handler_args, esp_event_base_t base, int32_t id, void *event_data)
 {
-    esp_hidd_event_t event = (esp_hidd_event_t)id;
-    esp_hidd_event_data_t *param = event_data;
-
-    switch (event) {
+    (void)handler_args;
+    (void)base;
+    (void)event_data;
+    switch ((esp_hidd_event_t)id) {
     case ESP_HIDD_START_EVENT:
-        ESP_LOGI(TAG, "HID 协议栈就绪,开始广播 \"%s\"", KBMIC_BLE_DEVICE_NAME);
+        ESP_LOGI(TAG, "HID 就绪，广播 %s", KBMIC_BLE_DEVICE_NAME);
         gap_adv_start();
+        kbmic_ble_svc_request_register();
         break;
     case ESP_HIDD_CONNECT_EVENT:
         s_connected = true;
-        ESP_LOGI(TAG, "Mac/主机已连接");
+        ESP_LOGI(TAG, "主机已连接");
+        if (s_boot_notify) {
+            const kbmic_config_t *cfg = kbmic_config_current();
+            kbmic_ble_svc_notify(KBMIC_EV_BOOT, cfg->active, 0,
+                                 cfg->profiles[cfg->active].name);
+        }
         break;
     case ESP_HIDD_DISCONNECT_EVENT:
         s_connected = false;
-        ESP_LOGI(TAG, "主机断开,重新广播");
+        ESP_LOGI(TAG, "主机断开，重新广播");
         gap_adv_start();
-        break;
-    case ESP_HIDD_PROTOCOL_MODE_EVENT:
-        ESP_LOGI(TAG, "协议模式[%u]: %s", param->protocol_mode.map_index,
-                 param->protocol_mode.protocol_mode ? "REPORT" : "BOOT");
-        break;
-    case ESP_HIDD_CONTROL_EVENT:
-        break;
-    case ESP_HIDD_OUTPUT_EVENT:
-        // 主机回送的 LED(大小写/数字锁定)状态。本机不显示这些,忽略即可。
         break;
     default:
         break;
     }
 }
 
-// ---------------------------------------------------------------------------
-// 对外接口
-// ---------------------------------------------------------------------------
 esp_err_t kbmic_hid_init(void)
 {
     esp_err_t ret = gap_stack_init();
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    // 注册 ESP-IDF HID 的 GATTS 事件处理器；不再启动额外的配置服务分发任务。
-    ret = esp_ble_gatts_register_callback(esp_hidd_gatts_event_handler);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "HID GATTS 回调注册失败: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
+    if (ret != ESP_OK) return ret;
+    ret = kbmic_ble_svc_install_dispatch();
+    if (ret != ESP_OK) return ret;
     ret = esp_hidd_dev_init(&s_hid_config, ESP_HID_TRANSPORT_BLE, hid_event_cb, &s_hid_dev);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "HID 设备初始化失败: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    return ESP_OK;
+    if (ret == ESP_OK) s_boot_notify = true;
+    return ret;
 }
 
 bool kbmic_hid_connected(void)
 {
-    return s_connected && esp_hidd_dev_connected(s_hid_dev);
+    return s_connected && s_hid_dev != NULL && esp_hidd_dev_connected(s_hid_dev);
 }
 
 esp_err_t kbmic_hid_key_hold(uint8_t modifier, uint8_t keycode, bool pressed)
@@ -370,10 +205,19 @@ esp_err_t kbmic_hid_applefn(bool pressed)
 {
     if (s_hid_dev == NULL || !kbmic_hid_connected()) return ESP_ERR_INVALID_STATE;
     uint8_t report[8] = {0};
-    if (pressed) {
-        report[1] = 0x01;
-    }
+    if (pressed) report[1] = 0x01;
     return esp_hidd_dev_input_set(s_hid_dev, KBMIC_MAP_KEYBOARD, 0, report, sizeof(report));
+}
+
+esp_err_t kbmic_hid_consumer(uint16_t usage, bool pressed)
+{
+    if (s_hid_dev == NULL || !kbmic_hid_connected()) return ESP_ERR_INVALID_STATE;
+    uint8_t report[2] = {0};
+    if (pressed) {
+        report[0] = (uint8_t)(usage & 0xFF);
+        report[1] = (uint8_t)(usage >> 8);
+    }
+    return esp_hidd_dev_input_set(s_hid_dev, KBMIC_MAP_CONSUMER, 0, report, sizeof(report));
 }
 
 esp_err_t kbmic_hid_tap(uint8_t modifier, uint8_t keycode)
@@ -382,4 +226,23 @@ esp_err_t kbmic_hid_tap(uint8_t modifier, uint8_t keycode)
     if (ret != ESP_OK) return ret;
     vTaskDelay(pdMS_TO_TICKS(KBMIC_TAP_HOLD_MS));
     return kbmic_hid_key_hold(0, 0, false);
+}
+
+esp_err_t kbmic_hid_reset_bonds(void)
+{
+    int count = 0;
+    if (esp_ble_get_bond_device_list(&count, NULL) != ESP_OK || count <= 0) count = 0;
+    esp_ble_bond_dev_t bonds[8];
+    if (count > (int)(sizeof(bonds) / sizeof(bonds[0])))
+        count = (int)(sizeof(bonds) / sizeof(bonds[0]));
+    if (count && esp_ble_get_bond_device_list(&count, bonds) != ESP_OK) count = 0;
+    int removed = 0;
+    for (int i = 0; i < count; i++) {
+        if (esp_ble_remove_bond_device(bonds[i].bd_addr) == ESP_OK) removed++;
+    }
+    (void)esp_ble_gap_stop_advertising();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    gap_adv_start();
+    ESP_LOGW(TAG, "已清除 %d 个 BLE bond，设备重新广播", removed);
+    return ESP_OK;
 }

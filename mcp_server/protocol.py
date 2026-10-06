@@ -25,7 +25,7 @@ from typing import Iterable
 # 常量:与固件 kbmic_config.h 一一对应
 # ---------------------------------------------------------------------------
 
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 MAX_PROFILES = 8
 BUILTIN_MODES = 4
 NAME_MAX = 16  # 含结尾 '\0',即最多 15 字节内容
@@ -420,7 +420,7 @@ class Profile:
 
 @dataclass
 class Config:
-    """整份配置。1580 字节,packed。
+    """整份配置。2300 字节,packed。
 
     profiles 永远保持 8 个槽位(count 之外的也要参与编解码,否则字节级往返不成立)。
     """
@@ -438,7 +438,7 @@ class Config:
         return out[:MAX_PROFILES]
 
     def encode(self) -> bytes:
-        """编成 1580 字节。尺寸不对会在这里直接炸,不会写出一份半截配置。"""
+        """编成 2300 字节。尺寸不对会在这里直接炸,不会写出一份半截配置。"""
         buf = bytearray(CONFIG_SIZE)
         _HDR_FMT.pack_into(buf, 0, self.version, self.active, self.count, self.reserved)
         for i, prof in enumerate(self._all_profiles()):
@@ -765,7 +765,7 @@ def split_chunks(blob: bytes) -> list[bytes]:
 
 
 def join_chunks(chunks: Iterable[bytes]) -> bytes:
-    """把读到的分片拼回 1580 字节。总长不对时明确报错,不做静默补齐。"""
+    """把读到的分片拼回 2300 字节。总长不对时明确报错,不做静默补齐。"""
     parts = list(chunks)
     if len(parts) != CHUNK_COUNT:
         raise ProtocolError(
@@ -825,7 +825,7 @@ def self_check() -> dict:
     assert len(zero.encode()) == CONFIG_SIZE
     assert Config.decode(zero.encode()).encode() == zero.encode()
 
-    # 出厂默认配置(从 catalog 延迟导入,避免模块级循环依赖)必须正好 1580 字节
+    # 出厂默认配置(从 catalog 延迟导入,避免模块级循环依赖)必须正好 2300 字节
     from catalog import factory_default_config  # noqa: PLC0415
 
     default = factory_default_config()

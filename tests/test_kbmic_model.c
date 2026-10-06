@@ -144,25 +144,56 @@ static void test_defaults(void)
     }
 
     char buf[KBMIC_ACTION_NAME_MAX];
-    // 四个平台的语音触发各不相同,这是这个设备存在的全部理由。
-    name_of(cfg.profiles[0].slots[KBMIC_BTN_OK][KBMIC_SLOT_TAP], buf, sizeof(buf));
-    CHECK_STR(buf, "Globe (hold)");
-    name_of(cfg.profiles[1].slots[KBMIC_BTN_OK][KBMIC_SLOT_TAP], buf, sizeof(buf));
-    CHECK_STR(buf, "Ctrl+Win (hold)");
-    name_of(cfg.profiles[2].slots[KBMIC_BTN_OK][KBMIC_SLOT_TAP], buf, sizeof(buf));
-    CHECK_STR(buf, "Space (hold)");
+    for (int i = 0; i < KBMIC_BUILTIN_MODES; i++) {
+        name_of(cfg.profiles[i].slots[KBMIC_BTN_DOWN][KBMIC_SLOT_TAP], buf, sizeof(buf));
+        CHECK_STR(buf, "Enter");
+        name_of(cfg.profiles[i].slots[KBMIC_BTN_DOWN][KBMIC_SLOT_DOUBLE], buf, sizeof(buf));
+        CHECK_STR(buf, "Esc");
+        name_of(cfg.profiles[i].slots[KBMIC_BTN_OK][KBMIC_SLOT_TAP], buf, sizeof(buf));
+        CHECK_STR(buf, "Back");
+        name_of(cfg.profiles[i].slots[KBMIC_BTN_OK][KBMIC_SLOT_LONG], buf, sizeof(buf));
+        CHECK_STR(buf, "Settings");
+        name_of(cfg.profiles[i].slots[KBMIC_BTN_UP][KBMIC_SLOT_LONG], buf, sizeof(buf));
+        CHECK_STR(buf, "Fn (hold)");
+        CHECK(cfg.profiles[i].slots[KBMIC_BTN_DOWN][KBMIC_SLOT_DOUBLE].trigger == KBMIC_TRIG_DOUBLE);
+        CHECK(cfg.profiles[i].slots[KBMIC_BTN_UP][KBMIC_SLOT_LONG].trigger == KBMIC_TRIG_TAP);
+    }
 
-    // 默认进设置挂在 OK 的长按槽上 —— 长按 OK 才是进菜单的入口。
-    name_of(cfg.profiles[0].slots[KBMIC_BTN_OK][KBMIC_SLOT_LONG], buf, sizeof(buf));
-    CHECK_STR(buf, "Settings");
+    for (int i = 1; i < KBMIC_BUILTIN_MODES; i++) {
+        CHECK(memcmp(&cfg.profiles[0].slots, &cfg.profiles[i].slots,
+                     sizeof(cfg.profiles[0].slots)) == 0);
+    }
+}
 
-    // 上下两个键在四个平台上是共通的。
-    name_of(cfg.profiles[0].slots[KBMIC_BTN_UP][KBMIC_SLOT_TAP], buf, sizeof(buf));
-    CHECK_STR(buf, "Enter");
-    name_of(cfg.profiles[0].slots[KBMIC_BTN_DOWN][KBMIC_SLOT_TAP], buf, sizeof(buf));
-    CHECK_STR(buf, "Back");
-    name_of(cfg.profiles[0].slots[KBMIC_BTN_UP][KBMIC_SLOT_LONG], buf, sizeof(buf));
-    CHECK_STR(buf, "Enter Enter Enter");
+static void test_v2_migration(void)
+{
+    kbmic_config_t defaults;
+    kbmic_config_defaults(&defaults);
+    kbmic_config_t migrated = defaults;
+    migrated.version = 2;
+    CHECK(kbmic_config_add_profile(&migrated, "自定义") == KBMIC_BUILTIN_MODES);
+    migrated.active = KBMIC_BUILTIN_MODES;
+    const kbmic_action_t custom_slot = migrated.profiles[KBMIC_BUILTIN_MODES]
+                                                  .slots[KBMIC_BTN_DOWN][KBMIC_SLOT_TAP];
+
+    // 模拟 v2 的平台差异和自定义档位内容。
+    migrated.profiles[1].slots[KBMIC_BTN_UP][KBMIC_SLOT_LONG] =
+        migrated.profiles[0].slots[KBMIC_BTN_DOWN][KBMIC_SLOT_TAP];
+
+    CHECK(kbmic_config_migrate_v2(&migrated));
+    CHECK(migrated.version == KBMIC_CONFIG_VERSION);
+    CHECK(migrated.active == KBMIC_BUILTIN_MODES);
+    CHECK(migrated.count == KBMIC_BUILTIN_MODES + 1);
+    CHECK_STR(migrated.profiles[KBMIC_BUILTIN_MODES].name, "自定义");
+    CHECK(memcmp(&migrated.profiles[KBMIC_BUILTIN_MODES].slots[KBMIC_BTN_DOWN][KBMIC_SLOT_TAP],
+                 &custom_slot, sizeof(custom_slot)) == 0);
+    for (int i = 0; i < KBMIC_BUILTIN_MODES; i++) {
+        CHECK(memcmp(&migrated.profiles[i].slots, &defaults.profiles[i].slots,
+                     sizeof(migrated.profiles[i].slots)) == 0);
+    }
+
+    migrated.version = 99;
+    CHECK(!kbmic_config_migrate_v2(&migrated));
 }
 
 // ---------------------------------------------------------------------------
@@ -211,7 +242,7 @@ static void test_validation(void)
 
     // 步类型越界。
     bad = cfg;
-    bad.profiles[0].slots[0][0].steps[0].kind = 7;
+    bad.profiles[0].slots[KBMIC_BTN_DOWN][KBMIC_SLOT_TAP].steps[0].kind = 7;
     CHECK(!kbmic_config_valid(&bad));
 
     CHECK(!kbmic_config_valid(NULL));
@@ -276,8 +307,8 @@ static void test_reset(void)
     CHECK(kbmic_config_reset_profile(&cfg, 1) == 0);
 
     char buf[KBMIC_ACTION_NAME_MAX];
-    name_of(cfg.profiles[1].slots[KBMIC_BTN_UP][KBMIC_SLOT_TAP], buf, sizeof(buf));
-    CHECK_STR(buf, "Enter");
+    name_of(cfg.profiles[1].slots[KBMIC_BTN_UP][KBMIC_SLOT_LONG], buf, sizeof(buf));
+    CHECK_STR(buf, "Fn (hold)");
 
     // 自定义模式没有出厂值可回。
     const int custom = kbmic_config_add_profile(&cfg, "会议");
@@ -292,6 +323,7 @@ int main(void)
 {
     test_action_names();
     test_defaults();
+    test_v2_migration();
     test_validation();
     test_add_delete();
     test_reset();

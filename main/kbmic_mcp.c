@@ -22,6 +22,7 @@
 #include "kbmic_action.h"
 #include "kbmic_hid.h"
 #include "esp_gap_ble_api.h"
+#include "esp_wifi.h"
 #include "kbmic_store.h"
 
 static const char *TAG = "kbmic_mcp";
@@ -61,7 +62,7 @@ static int parse_trigger(const cJSON *j)
 {
     if (cJSON_IsNumber(j)) {
         const int v = j->valueint;
-        return (v >= KBMIC_TRIG_NONE && v <= KBMIC_TRIG_LONG) ? v : -1;
+        return (v >= KBMIC_TRIG_NONE && v <= KBMIC_TRIG_DOUBLE) ? v : -1;
     }
     if (!cJSON_IsString(j) || !j->valuestring) return -1;
     const char *s = j->valuestring;
@@ -69,6 +70,7 @@ static int parse_trigger(const cJSON *j)
     if (!strcasecmp(s, "click")) return KBMIC_TRIG_CLICK;
     if (!strcasecmp(s, "tap"))   return KBMIC_TRIG_TAP;
     if (!strcasecmp(s, "long"))  return KBMIC_TRIG_LONG;
+    if (!strcasecmp(s, "double")) return KBMIC_TRIG_DOUBLE;
     return -1;
 }
 
@@ -76,7 +78,7 @@ static int parse_step_kind(const cJSON *j)
 {
     if (cJSON_IsNumber(j)) {
         const int v = j->valueint;
-        return (v >= KBMIC_STEP_NONE && v <= KBMIC_STEP_DELAY) ? v : -1;
+        return (v >= KBMIC_STEP_NONE && v <= KBMIC_STEP_APPLEFN) ? v : -1;
     }
     if (!cJSON_IsString(j) || !j->valuestring) return -1;
     const char *s = j->valuestring;
@@ -84,6 +86,7 @@ static int parse_step_kind(const cJSON *j)
     if (!strcasecmp(s, "key"))      return KBMIC_STEP_KEY;
     if (!strcasecmp(s, "consumer")) return KBMIC_STEP_CONSUMER;
     if (!strcasecmp(s, "delay"))    return KBMIC_STEP_DELAY;
+    if (!strcasecmp(s, "applefn"))  return KBMIC_STEP_APPLEFN;
     return -1;
 }
 
@@ -156,8 +159,7 @@ bool kbmic_action_from_json(const cJSON *j, kbmic_action_t *out)
 
 void kbmic_action_to_json(const kbmic_action_t *a, cJSON *out)
 {
-    static const char *trig_n[] = { "none", "click", "tap", "long" };
-    static const char *kind_n[] = { "none", "key", "consumer", "delay" };
+    static const char *kind_n[] = { "none", "key", "consumer", "delay", "applefn" };
     cJSON_AddNumberToObject(out, "trigger", a->trigger);
     char name[KBMIC_ACTION_NAME_MAX];
     kbmic_action_name(a, name, sizeof(name));
@@ -167,7 +169,8 @@ void kbmic_action_to_json(const kbmic_action_t *a, cJSON *out)
         const kbmic_step_t *st = &a->steps[i];
         cJSON *s = cJSON_CreateObject();
         cJSON_AddNumberToObject(s, "kind", st->kind);
-        cJSON_AddStringToObject(s, "kind_name", kind_n[st->kind & 3]);
+        cJSON_AddStringToObject(s, "kind_name",
+                                st->kind <= KBMIC_STEP_APPLEFN ? kind_n[st->kind] : "unknown");
         if (st->kind == KBMIC_STEP_KEY) {
             cJSON_AddNumberToObject(s, "mods", st->mods);
             cJSON_AddNumberToObject(s, "keycode", st->keycode);
@@ -339,7 +342,7 @@ static int tool_set_key(cJSON *args, appfw_mcp_resp_t *resp)
         if (trig_j) {
             const int t = parse_trigger(trig_j);
             if (t < 0) {
-                appfw_mcp_resp_addf(resp, "trigger 非法(none/click/tap/long)");
+                appfw_mcp_resp_addf(resp, "trigger 非法(none/click/tap/long/double)");
                 return 1;
             }
             action.trigger = (uint8_t)t;
@@ -362,7 +365,7 @@ static int tool_set_key(cJSON *args, appfw_mcp_resp_t *resp)
         if (trig_j) {
             const int t = parse_trigger(trig_j);
             if (t < 0) {
-                appfw_mcp_resp_addf(resp, "trigger 非法");
+                appfw_mcp_resp_addf(resp, "trigger 非法(none/click/tap/long/double)");
                 return 1;
             }
             action.trigger = (uint8_t)t;
@@ -372,14 +375,19 @@ static int tool_set_key(cJSON *args, appfw_mcp_resp_t *resp)
         return 1;
     }
 
-    // 长按槽强制 LONG 触发:否则阈值到点后没人收尾,按住不放会一直重复。
-    // 双击槽同理强制 DOUBLE(动作本体照发,只是触发语义跟槽走)。
-    if (slot->valueint == KBMIC_SLOT_LONG) {
+    // 普通动作在长按槽强制 LONG 触发:否则阈值到点后没人收尾,按住不放会一直重复。
+    // Apple Fn/Consumer 是“按下保持、松手释放”的 TAP 语义,必须保留原触发。
+    if (slot->valueint == KBMIC_SLOT_LONG &&
+        action.trigger == KBMIC_TRIG_TAP &&
+        !(action.step_count == 1 &&
+          (action.steps[0].kind == KBMIC_STEP_APPLEFN ||
+           action.steps[0].kind == KBMIC_STEP_CONSUMER))) {
         action.trigger = KBMIC_TRIG_LONG;
-    } else if (slot->valueint == KBMIC_SLOT_DOUBLE) {
+    }
+    // 双击槽同理强制 DOUBLE(动作本体照发,只是触发语义跟槽走)。
+    if (slot->valueint == KBMIC_SLOT_DOUBLE) {
         action.trigger = KBMIC_TRIG_DOUBLE;
     }
-
     kbmic_config_t work = *kbmic_config_current();
     if (idx->valueint < 0 || idx->valueint >= work.count ||
         btn->valueint < 0 || btn->valueint >= KBMIC_BTN_COUNT ||
@@ -591,6 +599,31 @@ static int tool_ble_reset(cJSON *args, appfw_mcp_resp_t *resp)
     return 0;
 }
 
+// 射频排障:停/启 WiFi(C3 单射频,WiFi 常驻时 BLE 通知可能在空口被共存
+// 调度丢弃 —— 表现为设备"发送无错"而主机收不到任何按键)。
+static int tool_radio(cJSON *args, appfw_mcp_resp_t *resp)
+{
+    const cJSON *mode = cJSON_GetObjectItemCaseSensitive(args, "wifi");
+    if (!cJSON_IsString(mode) || !mode->valuestring[0]) {
+        appfw_mcp_resp_addf(resp, "参数 wifi(string): \"off\" 停 WiFi 只跑蓝牙,"
+                                  "\"on\" 恢复 WiFi 连接");
+        return 1;
+    }
+    if (!strcasecmp(mode->valuestring, "off")) {
+        esp_wifi_stop();
+        appfw_mcp_resp_addf(resp, "WiFi 已停(射频全归蓝牙)。现在测试按键;"
+                                  "设备重启或 wifi=on 恢复");
+    } else if (!strcasecmp(mode->valuestring, "on")) {
+        appfw_net_reload_config();
+        appfw_net_connect_saved();
+        appfw_mcp_resp_addf(resp, "WiFi 已恢复连接");
+    } else {
+        appfw_mcp_resp_addf(resp, "wifi 只接受 off / on");
+        return 1;
+    }
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // 工具表与启动
 // ---------------------------------------------------------------------------
@@ -613,8 +646,8 @@ static const appfw_mcp_tool_t k_tools[] = {
       "{\"type\":\"object\",\"properties\":{\"index\":{\"type\":\"integer\"}},\"required\":[\"index\"]}",
       tool_reset_mode },
     { "kbmic_set_key", "设置某模式某键某槽的动作。preset=目录 id/名字(先 kbmic_action_catalog 查看)"
-                       "或 steps=[{kind:\"key\"|\"consumer\"|\"delay\",mods:\"Ctrl+Shift\",keycode,usage,delay_ms}]"
-                       "(≤4步);button:0=Up 1=Down 2=OK;slot:0=短按 1=长按;trigger 可覆盖触发方式",
+                       "或 steps=[{kind:\"key\"|\"consumer\"|\"delay\"|\"applefn\",mods:\"Ctrl+Shift\",keycode,usage,delay_ms}]"
+                       "(≤4步);button:0=Up 1=Down 2=OK;slot:0=短按 1=双击 2=长按;trigger 可覆盖触发方式",
       "{\"type\":\"object\",\"properties\":{\"index\":{\"type\":\"integer\"},\"button\":{\"type\":\"integer\"},"
       "\"slot\":{\"type\":\"integer\"},\"preset\":{},\"trigger\":{},\"steps\":{\"type\":\"array\"}},"
       "\"required\":[\"index\",\"button\",\"slot\"]}",
@@ -636,6 +669,9 @@ static const appfw_mcp_tool_t k_tools[] = {
     { "kbmic_wifi_remove_hotspot", "从已保存列表删除一个热点",
       "{\"type\":\"object\",\"properties\":{\"ssid\":{\"type\":\"string\"}},\"required\":[\"ssid\"]}",
       tool_wifi_remove },
+    { "kbmic_radio", "射频排障:wifi=\"off\" 停 WiFi 只跑蓝牙(测键盘是否被共存干扰),\"on\" 恢复",
+      "{\"type\":\"object\",\"properties\":{\"wifi\":{\"type\":\"string\",\"enum\":[\"off\",\"on\"]}},\"required\":[\"wifi\"]}",
+      tool_radio },
     { "kbmic_ble_reset", "蓝牙排障:清设备端全部绑定并重开广播(主机侧需忽略后重配对)",
       "{}", tool_ble_reset },
     { "kbmic_web_start", "启动网页管理页(浏览器打开返回的 URL,页面含键盘设置卡片)。"

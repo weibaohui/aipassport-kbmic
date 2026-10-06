@@ -8,8 +8,6 @@
 #include "freertos/task.h"
 #include "kbmic_hid.h"
 
-static const char *TAG = "kbmic_action";
-
 // TAP 动作按下报告到松开报告之间的保持时长。太短部分主机收不到,
 // 太长用户会觉得"粘",20 ms 是通用取值。
 #define ACTION_HOLD_MS 20
@@ -104,74 +102,70 @@ bool kbmic_action_is_settings(const kbmic_action_t *a)
 
 esp_err_t kbmic_action_run(const kbmic_action_t *a)
 {
-    if (a == NULL || a->trigger == KBMIC_TRIG_NONE) {
-        return ESP_OK;   // 没配就是什么都不做,不是错误
-    }
-    if (kbmic_action_is_settings(a)) {
-        return ESP_ERR_NOT_SUPPORTED;   // 由 main 拦截并切界面
-    }
+    if (a == NULL || a->trigger == KBMIC_TRIG_NONE) return ESP_OK;
+    if (kbmic_action_is_settings(a)) return ESP_ERR_NOT_SUPPORTED;
 
     for (uint8_t i = 0; i < a->step_count; i++) {
         const kbmic_step_t *s = &a->steps[i];
+        esp_err_t err = ESP_OK;
         switch (s->kind) {
         case KBMIC_STEP_KEY:
             if (a->trigger == KBMIC_TRIG_TAP) {
-                s_key_held = true;
-                kbmic_hid_key_hold(s->mods, s->keycode, true);
+                err = kbmic_hid_key_hold(s->mods, s->keycode, true);
+                if (err == ESP_OK) s_key_held = true;
             } else {
-                kbmic_hid_tap(s->mods, s->keycode);
+                err = kbmic_hid_tap(s->mods, s->keycode);
             }
             break;
-
         case KBMIC_STEP_CONSUMER:
+            err = kbmic_hid_consumer(s->usage, true);
+            if (err != ESP_OK) return err;
             if (a->trigger == KBMIC_TRIG_TAP) {
                 s_consumer_held = true;
-                kbmic_hid_consumer(s->usage, true);
             } else {
-                kbmic_hid_consumer(s->usage, true);
                 vTaskDelay(pdMS_TO_TICKS(ACTION_HOLD_MS));
-                kbmic_hid_consumer(s->usage, false);
+                err = kbmic_hid_consumer(s->usage, false);
             }
             break;
-
         case KBMIC_STEP_APPLEFN:
-            // 按住 Apple Fn:AppleVendor Top Case usage 0x03 放入键盘报告第 2 字节。
+            // Apple Fn:AppleVendor Top Case usage 0x03 放在键盘报告第 2 字节。
+            err = kbmic_hid_applefn(true);
+            if (err != ESP_OK) return err;
             if (a->trigger == KBMIC_TRIG_TAP) {
                 s_applefn_held = true;
-                kbmic_hid_applefn(true);
             } else {
-                kbmic_hid_applefn(true);
                 vTaskDelay(pdMS_TO_TICKS(ACTION_HOLD_MS));
-                kbmic_hid_applefn(false);
+                err = kbmic_hid_applefn(false);
             }
             break;
-
         case KBMIC_STEP_DELAY:
-            // 延时步在 TAP 动作里没有意义(按住期间本来就一直在发状态),
-            // 但也不该让整条动作失败,照睡即可。
             vTaskDelay(pdMS_TO_TICKS(s->delay_ms ? s->delay_ms : 1));
             break;
-
         default:
             break;
         }
+        if (err != ESP_OK) return err;
     }
     return ESP_OK;
 }
 
 esp_err_t kbmic_action_release(void)
 {
+    esp_err_t first_error = ESP_OK;
     if (s_key_held) {
         s_key_held = false;
-        kbmic_hid_key_hold(0, 0, false);
+        const esp_err_t err = kbmic_hid_key_hold(0, 0, false);
+        if (err != ESP_OK) first_error = err;
     }
     if (s_consumer_held) {
         s_consumer_held = false;
-        kbmic_hid_consumer(0, false);
+        const esp_err_t err = kbmic_hid_consumer(0, false);
+        if (first_error == ESP_OK && err != ESP_OK) first_error = err;
     }
     if (s_applefn_held) {
         s_applefn_held = false;
-        kbmic_hid_applefn(false);
+        const esp_err_t err = kbmic_hid_applefn(false);
+        if (first_error == ESP_OK && err != ESP_OK) first_error = err;
     }
-    return ESP_OK;
+    return first_error;
 }

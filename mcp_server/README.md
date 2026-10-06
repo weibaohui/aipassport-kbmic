@@ -128,6 +128,7 @@ reorder one without the other. Reference presets by id or by name
 | 13 | F1 | click | 1 × KEY(0x3A) |
 | 14 | F2 | click | 1 × KEY(0x3B) |
 | 15 | Settings | none | software action: opens the on-device menu, sends no HID report |
+| 16 | Apple Fn (hold) | tap (hold) | 1 × APPLEFN(Fn; Apple Top Case) |
 
 ## 6. Custom steps
 
@@ -135,7 +136,7 @@ reorder one without the other. Reference presets by id or by name
 
 | Field | Meaning |
 | --- | --- |
-| `kind` | `0/none`, `1/key`, `2/consumer`, `3/delay` |
+| `kind` | `0/none`, `1/key`, `2/consumer`, `3/delay`, `4/applefn` |
 | `mods` | Bit mask, or a string like `"Ctrl+Shift"`. bit0=Ctrl bit1=Shift bit2=Alt bit3=Win |
 | `keycode` | HID keyboard usage code (Enter 0x28, Esc 0x29, Backspace 0x2A, Tab 0x2B, Space 0x2C, A–Z 0x04–0x1D, digits 0x1E–0x27, F1–F12 0x3A–0x45) |
 | `usage` | 16-bit Consumer usage (Globe = 0x029D) |
@@ -163,6 +164,7 @@ the firmware's `kbmic_action_name()` must produce the same strings:
   degrade to `0x%02X`.
 - `CONSUMER`: `0x029D` renders as `Globe`, anything else as `C:0x%04X`.
 - `DELAY`: `+%dms`.
+- `APPLEFN`: `Fn`; press-and-hold actions get ` (hold)` appended.
 - Multiple steps joined by a single space.
 - Tap (press-and-hold) actions get ` (hold)` appended.
 - An empty action or `trigger=none` renders as `-`.
@@ -172,31 +174,31 @@ the firmware's `kbmic_action_name()` must produce the same strings:
 
 ```
 Service        7d1c5a30-9f6e-4a21-8c3d-2b5e7a9f1c48
-Config chunk 0 7d1c5a40-…  read / write      10 chunks total; the first 9 are 160 bytes
-Config chunk 9 7d1c5a49-…  read / write      the tenth is 140 bytes
+Config chunk 0 7d1c5a40-…  read / write      15 chunks total; the first 14 are 160 bytes
+Config chunk 14 7d1c5a4e-… read / write      the fifteenth is 60 bytes
 Event          7d1c5a4f-…  read / notify
 ```
 
 - The firmware has **no GATT long read/write**, so the server always uses plain
   single read/write calls and reassembles the chunks itself.
-- Writes use `response=True`, one call per chunk, in order 0..9.
-- The device commits and saves only after all 10 chunks arrive and pass
+- Writes use `response=True`, one call per chunk, in order 0..14.
+- The device commits and saves only after all 15 chunks arrive and pass
   validation, so "write the config" is never a partial state.
 - After writing, the server reads the config back and compares; a mismatch comes
   back as `verified: false` plus a `mismatch` list.
 
-Config layout (little-endian, packed, 1580 bytes total):
+Config layout (little-endian, packed, 2300 bytes total):
 
 ```
-0    1  version  = 1
+0    1  version  = 3
 1    1  active   active mode index
 2    1  count    number of modes, 1..8
 3    1  reserved
-4  1576 profiles[8]     197 bytes each
+4  2296 profiles[8]     287 bytes each
 ```
 
 A profile is a 16-byte UTF-8 name (NUL-terminated, 15 bytes of content) + a
-1-byte builtin flag + `slots[3][2]` (3 buttons × 2 slots). A slot is 30 bytes
+1-byte builtin flag + `slots[3][3]` (3 buttons × 3 slots). A slot is 30 bytes
 (trigger + step count + 4 × 7-byte steps).
 
 Event payload: `type(1) + active(1) + aux(1) + reserved(1) + name_len(1) + name(n)`,
@@ -209,7 +211,7 @@ mcp_server/
 ├── protocol.py       wire format: constants, offsets, codec, validation, names, chunks, events
 ├── catalog.py        16 built-in presets + factory defaults for the 4 built-in modes
 ├── ble.py            BLE transport: scan, connect, chunked read/write, event subscription
-├── server.py         MCP stdio server and the 12 tools (touches no Bluetooth at import)
+├── server.py         MCP stdio server and its tools (touches no Bluetooth at import)
 ├── test_protocol.py  unit tests (stdlib unittest, no hardware needed)
 ├── requirements.txt  dependencies
 └── README.md         this file

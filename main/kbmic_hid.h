@@ -1,7 +1,7 @@
-// main/kbmic_hid.h —— Mac 最小模式 BLE HID 键盘。
+// main/kbmic_hid.h —— 可配置 BLE HID 键盘。
 //
-// 设备以 HOGP(HID over GATT)身份广播。8 字节报告依次为 modifier、Apple Fn、
-// 6 个键码；Fn 使用 AppleVendor Top Case usage page 0xFF / KeyboardFn usage 0x03。
+// 键盘输入报告为 8 字节:[modifier][Apple Fn][6 个键码];附 Consumer Control
+// 报告供用户快捷键扩展。Fn 字段使用 Apple Top Case Usage Page 0xFF/Usage 0x03。
 #pragma once
 
 #include <stdbool.h>
@@ -27,3 +27,9 @@ esp_err_t kbmic_hid_key_hold(uint8_t modifier, uint8_t keycode, bool pressed);
 
 // Apple Fn:复用 8 字节键盘报告,在第 2 字节发送 AppleVendor Top Case/KeyboardFn。
 esp_err_t kbmic_hid_applefn(bool pressed);
+
+// Consumer Page usage,用于可配置的 Globe/媒体键动作。
+esp_err_t kbmic_hid_consumer(uint16_t usage, bool pressed);
+
+// 清除设备侧持久化的 BLE bond 并恢复广播,排查主机缓存旧报告描述符时使用。
+esp_err_t kbmic_hid_reset_bonds(void);

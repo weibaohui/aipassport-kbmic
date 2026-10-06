@@ -104,9 +104,17 @@ static esp_err_t handler_set_key(httpd_req_t *req)
             const kbmic_catalog_item_t *item = kbmic_catalog_get((uint8_t)preset->valueint);
             if (item) {
                 kbmic_action_t action = item->action;
-                if (slot->valueint == KBMIC_SLOT_LONG) action.trigger = KBMIC_TRIG_LONG;
+                const bool hold_action = action.trigger == KBMIC_TRIG_TAP &&
+                    action.step_count == 1 &&
+                    (action.steps[0].kind == KBMIC_STEP_APPLEFN ||
+                     action.steps[0].kind == KBMIC_STEP_CONSUMER);
+                if (slot->valueint == KBMIC_SLOT_LONG && !hold_action) {
+                    action.trigger = KBMIC_TRIG_LONG;
+                } else if (slot->valueint == KBMIC_SLOT_DOUBLE) {
+                    action.trigger = KBMIC_TRIG_DOUBLE;
+                }
                 else if (cJSON_IsNumber(trig) &&
-                         trig->valueint >= KBMIC_TRIG_NONE && trig->valueint <= KBMIC_TRIG_LONG) {
+                         trig->valueint >= KBMIC_TRIG_NONE && trig->valueint <= KBMIC_TRIG_DOUBLE) {
                     action.trigger = (uint8_t)trig->valueint;
                 }
                 work.profiles[idx->valueint].slots[btn->valueint][slot->valueint] = action;

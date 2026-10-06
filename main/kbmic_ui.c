@@ -8,6 +8,7 @@
 
 #include "bsp_battery.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
 #include "kbmic_action.h"
 #include "kbmic_config.h"
 #include "kbmic_hid.h"
@@ -32,15 +33,32 @@ static const char *TAG = "kbmic_ui";
 #define UI_WARN 0xE6A23C
 
 // ---------------------------------------------------------------------------
-// 说话状态(main 的按键回调更新)
+// 实时状态(main 的按键任务更新,LVGL 任务读取)
 // ---------------------------------------------------------------------------
+static portMUX_TYPE s_ui_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_voice_active;
 static char s_voice_btn[8];
+static char s_feedback[64];
+static bool s_feedback_ok = true;
 
 void kbmic_ui_set_voice(bool active, const char *btn_label)
 {
+    char name[sizeof(s_voice_btn)] = {0};
+    snprintf(name, sizeof(name), "%s", btn_label ? btn_label : "");
+    portENTER_CRITICAL(&s_ui_state_lock);
     s_voice_active = active;
-    snprintf(s_voice_btn, sizeof(s_voice_btn), "%s", btn_label ? btn_label : "?");
+    memcpy(s_voice_btn, name, sizeof(s_voice_btn));
+    portEXIT_CRITICAL(&s_ui_state_lock);
+}
+
+void kbmic_ui_set_feedback(const char *message, bool success)
+{
+    char copy[sizeof(s_feedback)] = {0};
+    snprintf(copy, sizeof(copy), "%s", message ? message : "");
+    portENTER_CRITICAL(&s_ui_state_lock);
+    memcpy(s_feedback, copy, sizeof(s_feedback));
+    s_feedback_ok = success;
+    portEXIT_CRITICAL(&s_ui_state_lock);
 }
 
 // ---------------------------------------------------------------------------
@@ -65,25 +83,43 @@ static lv_obj_t *mk_label(lv_obj_t *parent, int x, int y, uint32_t color)
 }
 
 // ---------------------------------------------------------------------------
-// 主页:语音大块 + 状态行
+// 主页:三键图例 + 模式/连接状态 + 最近一次按键反馈
 // ---------------------------------------------------------------------------
-static lv_obj_t *s_hero, *s_hero_text;
-static lv_obj_t *s_line_mode, *s_line_link, *s_line_batt;
+static lv_obj_t *s_key_cards[3];
+static lv_obj_t *s_key_title[3];
+static lv_obj_t *s_key_hint[3];
+static lv_obj_t *s_line_status;
+static lv_obj_t *s_line_feedback;
 
 void kbmic_home_build(lv_obj_t *parent)
 {
-    s_hero = lv_obj_create(parent);
-    lv_obj_set_size(s_hero, 216, UI_HERO_H);
-    lv_obj_set_pos(s_hero, UI_PAD_X, UI_HERO_Y);
-    style_box(s_hero, UI_CARD, 14);
+    static const char *const titles[3] = {
+        "上键  ·  语音",
+        "下键  ·  输入/取消",
+        "OK键  ·  编辑",
+    };
+    static const char *const hints[3] = {
+        "长按 Fn 开始   松开停止",
+        "短按 回车       双击 取消",
+        "短按 退格       长按 设置",
+    };
+    static const uint32_t colors[3] = {0x3267D5, 0x16856B, 0xA35CC4};
 
-    s_hero_text = lv_label_create(s_hero);
-    lv_obj_set_style_text_font(s_hero_text, &app_font_16, LV_PART_MAIN);
-    lv_obj_center(s_hero_text);
-
-    s_line_mode = mk_label(parent, UI_PAD_X, UI_INFO_Y, UI_FG);
-    s_line_link = mk_label(parent, UI_PAD_X, UI_INFO_Y + UI_LINE_H, UI_DIM);
-    s_line_batt = mk_label(parent, UI_PAD_X, UI_INFO_Y + UI_LINE_H * 2, UI_DIM);
+    for (int i = 0; i < 3; i++) {
+        const int y = 48 + i * 61;
+        s_key_cards[i] = lv_obj_create(parent);
+        lv_obj_set_size(s_key_cards[i], 216, 55);
+        lv_obj_set_pos(s_key_cards[i], UI_PAD_X, y);
+        style_box(s_key_cards[i], UI_CARD, 10);
+        lv_obj_set_style_border_width(s_key_cards[i], 2, 0);
+        lv_obj_set_style_border_color(s_key_cards[i], lv_color_hex(colors[i]), 0);
+        s_key_title[i] = mk_label(s_key_cards[i], 10, 5, colors[i]);
+        s_key_hint[i] = mk_label(s_key_cards[i], 10, 28, UI_FG);
+        lv_label_set_text(s_key_title[i], titles[i]);
+        lv_label_set_text(s_key_hint[i], hints[i]);
+    }
+    s_line_status = mk_label(parent, UI_PAD_X, 236, UI_FG);
+    s_line_feedback = mk_label(parent, UI_PAD_X, 260, UI_DIM);
 }
 
 void kbmic_home_poll(void)
@@ -91,27 +127,37 @@ void kbmic_home_poll(void)
     const kbmic_config_t *cfg = kbmic_config_current();
     const bool linked = kbmic_hid_connected();
     const int soc = bsp_battery_soc();
+    bool voice_active;
+    bool feedback_ok;
+    char voice_btn[sizeof(s_voice_btn)];
+    char feedback[sizeof(s_feedback)];
 
-    if (s_voice_active) {
-        style_box(s_hero, UI_ACCENT, 14);
-        lv_obj_set_style_text_color(s_hero_text, lv_color_hex(0x06210F), 0);
-        lv_label_set_text_fmt(s_hero_text, "说话中(松开%s结束)", s_voice_btn);
-    } else if (s_voice_btn[0]) {
-        style_box(s_hero, UI_CARD, 14);
-        lv_obj_set_style_text_color(s_hero_text, lv_color_hex(UI_FG), 0);
-        lv_label_set_text_fmt(s_hero_text, "按住%s 说话", s_voice_btn);
+    portENTER_CRITICAL(&s_ui_state_lock);
+    voice_active = s_voice_active;
+    feedback_ok = s_feedback_ok;
+    memcpy(voice_btn, s_voice_btn, sizeof(voice_btn));
+    memcpy(feedback, s_feedback, sizeof(feedback));
+    portEXIT_CRITICAL(&s_ui_state_lock);
+
+    lv_obj_set_style_bg_color(s_key_cards[0],
+                              lv_color_hex(voice_active ? 0x174D37 : UI_CARD), 0);
+    lv_obj_set_style_text_color(s_key_hint[0],
+                                lv_color_hex(voice_active ? 0x7CF0A9 : UI_FG), 0);
+    lv_label_set_text(s_key_hint[0], voice_active ? "正在听写   松开上键停止" :
+                                                   "长按 Fn 开始   松开停止");
+    if (soc >= 0) {
+        lv_label_set_text_fmt(s_line_status, "%s  蓝牙%s  %d%%",
+                              cfg->profiles[cfg->active].name,
+                              linked ? "已连接" : "未连接", soc);
     } else {
-        style_box(s_hero, UI_CARD, 14);
-        lv_obj_set_style_text_color(s_hero_text, lv_color_hex(UI_DIM), 0);
-        lv_label_set_text(s_hero_text, "语音键未配置");
+        lv_label_set_text_fmt(s_line_status, "%s  蓝牙%s",
+                              cfg->profiles[cfg->active].name,
+                              linked ? "已连接" : "未连接");
     }
-
-    lv_label_set_text_fmt(s_line_mode, "模式 %s(%u/%u)",
-                          cfg->profiles[cfg->active].name,
-                          (unsigned)(cfg->active + 1), (unsigned)cfg->count);
-    lv_label_set_text(s_line_link, linked ? "蓝牙 已连接" : "蓝牙 等待配对");
-    if (soc >= 0) lv_label_set_text_fmt(s_line_batt, "电量 %d%%", soc);
-    else lv_label_set_text(s_line_batt, "电量 --");
+    lv_obj_set_style_text_color(s_line_feedback,
+                                lv_color_hex(feedback_ok ? UI_ACCENT : UI_WARN), 0);
+    lv_label_set_text_fmt(s_line_feedback, "操作反馈：%s",
+                          feedback[0] ? feedback : "按键图例见上");
 }
 
 // ---------------------------------------------------------------------------
@@ -316,9 +362,15 @@ bool kbmic_nav_key(int btn, int ev)
             case NAV_ACT: {
                 kbmic_config_t work = *kbmic_config_current();
                 kbmic_action_t a = kbmic_catalog_get((uint8_t)(cur - 1))->action;
-                // 槽的触发语义跟槽走:长按槽=LONG,双击槽=DOUBLE
-                if (s_nav_slot == KBMIC_SLOT_LONG) a.trigger = KBMIC_TRIG_LONG;
-                else if (s_nav_slot == KBMIC_SLOT_DOUBLE) a.trigger = KBMIC_TRIG_DOUBLE;
+                // 普通槽的触发语义跟槽走;Apple Fn/Consumer 需要按下保持/松手释放。
+                const bool hold_action = a.trigger == KBMIC_TRIG_TAP && a.step_count == 1 &&
+                    (a.steps[0].kind == KBMIC_STEP_APPLEFN ||
+                     a.steps[0].kind == KBMIC_STEP_CONSUMER);
+                if (s_nav_slot == KBMIC_SLOT_LONG && !hold_action) {
+                    a.trigger = KBMIC_TRIG_LONG;
+                } else if (s_nav_slot == KBMIC_SLOT_DOUBLE) {
+                    a.trigger = KBMIC_TRIG_DOUBLE;
+                }
                 work.profiles[work.active].slots[s_nav_btn][s_nav_slot] = a;
                 kbmic_config_commit(&work);
                 s_nav_view = NAV_KEYS;

@@ -35,6 +35,7 @@ from protocol import (  # noqa: E402
     STEP_KEY,
     STEP_NONE,
     TRIGGER_CLICK,
+    TRIGGER_DOUBLE,
     TRIGGER_NONE,
     TRIGGER_TAP,
 )
@@ -117,7 +118,7 @@ class TestRoundTrip(unittest.TestCase):
     def test_header_fields(self):
         cfg = catalog.factory_default_config()
         blob = cfg.encode()
-        self.assertEqual(blob[0], 2, "version 必须是 2")
+        self.assertEqual(blob[0], 3, "version 必须是 3")
         self.assertEqual(blob[1], 0, "active 必须是 0")
         self.assertEqual(blob[2], 4, "出厂配置 4 个模式")
         self.assertEqual(blob[3], 0, "reserved")
@@ -126,7 +127,7 @@ class TestRoundTrip(unittest.TestCase):
         blob = catalog.factory_default_config().encode()
         # 模式 0 的 builtin 标记在 4 + 16
         self.assertEqual(blob[4 + 16], 1)
-        # Mac 的 Down/短按 = CLICK + 1 步 KEY(0x28 回车;Up 短按已按用户要求置空)
+        # 所有内置档位的 Down/短按 = CLICK + 1 步 KEY(0x28 Enter)。
         off = P.slot_offset(0, P.BTN_DOWN, P.SLOT_TAP)
         self.assertEqual(blob[off], TRIGGER_CLICK)
         self.assertEqual(blob[off + 1], 1)
@@ -135,6 +136,11 @@ class TestRoundTrip(unittest.TestCase):
         self.assertEqual(blob[step_off + 1], 0)          # mods
         self.assertEqual(blob[step_off + 2], 0x28)       # keycode
         self.assertEqual(struct.unpack_from("<H", blob, step_off + 3)[0], 0)  # usage
+
+        cancel_off = P.slot_offset(0, P.BTN_DOWN, P.SLOT_DOUBLE)
+        self.assertEqual(blob[cancel_off], TRIGGER_DOUBLE)
+        self.assertEqual(blob[cancel_off + 1], 1)
+        self.assertEqual(blob[cancel_off + 2 + 2], 0x29)  # Escape = cancel
 
     def test_name_is_nul_terminated_utf8(self):
         blob = catalog.factory_default_config().encode()
@@ -262,22 +268,17 @@ class TestActionNames(unittest.TestCase):
 
     def test_names_of_all_builtin_default_slots(self):
         cfg = catalog.factory_default_config()
-        expect = {
-            # 四模式统一键位(用户定稿三改):短按下=Enter,双击下=Esc,
-            # 短按OK=Back,长按OK=Settings,长按上=按住语音键(平台变体)。
-            (0, P.BTN_UP, P.SLOT_TAP): "-",
-            (0, P.BTN_UP, P.SLOT_LONG): "Fn (hold)",          # Mac = Apple Fn
-            (0, P.BTN_DOWN, P.SLOT_TAP): "Enter",
-            (0, P.BTN_DOWN, P.SLOT_DOUBLE): "Esc",
-            (0, P.BTN_DOWN, P.SLOT_LONG): "-",
-            (0, P.BTN_OK, P.SLOT_TAP): "Back",
-            (0, P.BTN_OK, P.SLOT_LONG): "Settings",
-            (1, P.BTN_UP, P.SLOT_LONG): "Ctrl+Win (hold)",    # Windows
-            (1, P.BTN_OK, P.SLOT_TAP): "Back",
-            (1, P.BTN_OK, P.SLOT_LONG): "Settings",
-            (2, P.BTN_UP, P.SLOT_LONG): "Space (hold)",       # Android
-            (3, P.BTN_UP, P.SLOT_LONG): "Globe (hold)",       # iOS
+        expect_per_profile = {
+            (P.BTN_UP, P.SLOT_TAP): "-",
+            (P.BTN_UP, P.SLOT_LONG): "Fn (hold)",
+            (P.BTN_DOWN, P.SLOT_TAP): "Enter",
+            (P.BTN_DOWN, P.SLOT_DOUBLE): "Esc",
+            (P.BTN_OK, P.SLOT_TAP): "Back",
+            (P.BTN_OK, P.SLOT_LONG): "Settings",
         }
+        expect = {(i, b, s): name
+                  for i in range(P.BUILTIN_MODES)
+                  for (b, s), name in expect_per_profile.items()}
         for (i, b, s), want in expect.items():
             got = P.action_name(cfg.profiles[i].get_slot(b, s))
             self.assertEqual(got, want, f"profile {i} {P.BUTTON_NAMES[b]}/{P.SLOT_NAMES[s]}")
@@ -415,7 +416,7 @@ class TestRejections(unittest.TestCase):
             Step(kind=STEP_DELAY, delay_ms=70000).validate()
 
     def test_bad_version_rejected(self):
-        self.cfg.version = 3
+        self.cfg.version = 99
         with self.assertRaises(ProtocolError):
             self.cfg.validate()
 

@@ -30,7 +30,8 @@
 #define KBMIC_BTN_COUNT 3       // 上 / 下 / OK
 #define KBMIC_SLOT_COUNT 3      // 短按 / 双击 / 长按
 
-#define KBMIC_CONFIG_VERSION 2
+#define KBMIC_CONFIG_VERSION 3
+#define KBMIC_CONFIG_VERSION_PREVIOUS 2
 
 // ---------------------------------------------------------------------------
 // HID 键码与用法码
@@ -112,7 +113,7 @@ typedef struct __attribute__((packed)) {
     char name[KBMIC_NAME_MAX]; // 模式名,UTF-8,必须以 '\0' 结尾
     uint8_t builtin;           // 1 = 内置,不可删除/覆盖其身份
     kbmic_action_t slots[KBMIC_BTN_COUNT][KBMIC_SLOT_COUNT];
-} kbmic_profile_t;            // 16 + 1 + 180 = 197 字节
+} kbmic_profile_t;            // 16 + 1 + 9*30 = 287 字节
 
 typedef struct __attribute__((packed)) {
     uint8_t version;   // KBMIC_CONFIG_VERSION
@@ -120,12 +121,16 @@ typedef struct __attribute__((packed)) {
     uint8_t count;     // 模式总数,<= KBMIC_MAX_PROFILES
     uint8_t reserved;  // 留空,保持 4 字节头对齐
     kbmic_profile_t profiles[KBMIC_MAX_PROFILES];
-} kbmic_config_t;     // 4 + 8*197 = 1580 字节
+} kbmic_config_t;     // 4 + 8*287 = 2300 字节
 
 #define KBMIC_CONFIG_SIZE ((uint16_t)sizeof(kbmic_config_t))
 
-// 置位:把内置四模式与「按住的默认行为」装好。count 置 4,active 置 0(Mac)。
+// 置位:把内置四模式的统一默认快捷键装好。count 置 4,active 置 0(Mac)。
 void kbmic_config_defaults(kbmic_config_t *cfg);
+
+// v2/v3 布局相同。把前四个内置档位的键位改成 v3 统一默认值,版本号升到当前值;
+// 自定义档位、当前激活索引和自定义档位内容全部保留。非法输入返回 false。
+bool kbmic_config_migrate_v2(kbmic_config_t *cfg);
 
 // 越界/字段非法的自检。MCP 写进来的数据在用它之前必须过这一关。
 bool kbmic_config_valid(const kbmic_config_t *cfg);
