@@ -55,6 +55,54 @@ static const char *slot_name(int s)
     }
 }
 
+static const char *trigger_name(int s)
+{
+    switch (s) {
+    case KBMIC_TRIG_CLICK:  return "click";
+    case KBMIC_TRIG_TAP:    return "tap/hold";
+    case KBMIC_TRIG_LONG:   return "long";
+    case KBMIC_TRIG_DOUBLE: return "double";
+    default:                return "none";
+    }
+}
+
+static bool builtin_index(int index)
+{
+    return index >= 0 && index < KBMIC_BUILTIN_MODES;
+}
+
+static int parse_button_arg(const cJSON *j)
+{
+    if (cJSON_IsNumber(j)) {
+        const int v = j->valueint;
+        return (v >= 0 && v < KBMIC_BTN_COUNT) ? v : -1;
+    }
+    if (!cJSON_IsString(j) || !j->valuestring) return -1;
+    const char *s = j->valuestring;
+    if (!strcasecmp(s, "up") || !strcasecmp(s, "上")) return KBMIC_BTN_UP;
+    if (!strcasecmp(s, "down") || !strcasecmp(s, "下")) return KBMIC_BTN_DOWN;
+    if (!strcasecmp(s, "ok") || !strcasecmp(s, "confirm") ||
+        !strcasecmp(s, "确认")) return KBMIC_BTN_OK;
+    return -1;
+}
+
+static int parse_slot_arg(const cJSON *j)
+{
+    if (cJSON_IsNumber(j)) {
+        const int v = j->valueint;
+        return (v >= 0 && v < KBMIC_SLOT_COUNT) ? v : -1;
+    }
+    if (!cJSON_IsString(j) || !j->valuestring) return -1;
+    const char *s = j->valuestring;
+    if (!strcasecmp(s, "short") || !strcasecmp(s, "short-tap") ||
+        !strcasecmp(s, "tap") || !strcasecmp(s, "短按")) return KBMIC_SLOT_TAP;
+    if (!strcasecmp(s, "double") || !strcasecmp(s, "double-click") ||
+        !strcasecmp(s, "双击")) return KBMIC_SLOT_DOUBLE;
+    if (!strcasecmp(s, "long") || !strcasecmp(s, "long-press") ||
+        !strcasecmp(s, "长按")) return KBMIC_SLOT_LONG;
+    return -1;
+}
+
 // ---------------------------------------------------------------------------
 // JSON ↔ 动作
 // ---------------------------------------------------------------------------
@@ -227,6 +275,102 @@ static int tool_get_config(cJSON *args, appfw_mcp_resp_t *resp)
     return 0;
 }
 
+static int tool_list_modes(cJSON *args, appfw_mcp_resp_t *resp)
+{
+    (void)args;
+    const kbmic_config_t *cfg = kbmic_config_current();
+    appfw_mcp_resp_addf(resp, "模式 %u/%u,当前 #%u %s:",
+                        cfg->count, KBMIC_MAX_PROFILES, cfg->active,
+                        cfg->profiles[cfg->active].name);
+    for (uint8_t i = 0; i < cfg->count; i++) {
+        const kbmic_profile_t *p = &cfg->profiles[i];
+        appfw_mcp_resp_addf(resp, "\n%d. %s [%s%s]", i, p->name,
+                            p->builtin ? "内置只读" : "自定义可改",
+                            i == cfg->active ? ",使用中" : "");
+    }
+    appfw_mcp_resp_addf(resp,
+                        "\n内置模式只读；新建请用 kbmic_create_mode(name,template)。");
+    return 0;
+}
+
+static int tool_get_mode(cJSON *args, appfw_mcp_resp_t *resp)
+{
+    const cJSON *idx = cJSON_GetObjectItemCaseSensitive(args, "index");
+    if (!cJSON_IsNumber(idx)) {
+        appfw_mcp_resp_addf(resp, "参数 index(number)缺失");
+        return 1;
+    }
+    const kbmic_config_t *cfg = kbmic_config_current();
+    if (idx->valueint < 0 || idx->valueint >= cfg->count) {
+        appfw_mcp_resp_addf(resp, "index 越界(0..%d)", cfg->count - 1);
+        return 1;
+    }
+
+    const kbmic_profile_t *p = &cfg->profiles[idx->valueint];
+    appfw_mcp_resp_addf(resp, "模式 [%d]%s (%s%s)",
+                        idx->valueint, p->name,
+                        p->builtin ? "内置只读" : "自定义可改",
+                        idx->valueint == cfg->active ? ",使用中" : "");
+    char name[KBMIC_ACTION_NAME_MAX];
+    for (int b = 0; b < KBMIC_BTN_COUNT; b++) {
+        appfw_mcp_resp_addf(resp, "\n%s:", btn_name(b));
+        for (int s = 0; s < KBMIC_SLOT_COUNT; s++) {
+            const kbmic_action_t *a = &p->slots[b][s];
+            appfw_mcp_resp_addf(resp, "\n  %s [%s] = %s",
+                                slot_name(s), trigger_name(a->trigger),
+                                kbmic_action_name(a, name, sizeof(name)));
+        }
+    }
+    return 0;
+}
+
+static int tool_create_mode(cJSON *args, appfw_mcp_resp_t *resp)
+{
+    const cJSON *nm = cJSON_GetObjectItemCaseSensitive(args, "name");
+    const cJSON *tpl = cJSON_GetObjectItemCaseSensitive(args, "template");
+    const cJSON *act = cJSON_GetObjectItemCaseSensitive(args, "activate");
+
+    int base = 0; // 默认从 Mac 模板创建。
+    if (cJSON_IsNumber(tpl)) {
+        base = tpl->valueint;
+    } else if (cJSON_IsString(tpl) && tpl->valuestring[0]) {
+        static const char *const names[KBMIC_BUILTIN_MODES] = {
+            "Mac", "Windows", "Android", "iOS",
+        };
+        bool found = false;
+        for (int i = 0; i < KBMIC_BUILTIN_MODES; i++) {
+            if (!strcasecmp(tpl->valuestring, names[i])) {
+                base = i;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            appfw_mcp_resp_addf(resp, "template 只支持 Mac/Windows/Android/iOS 或 0..3");
+            return 1;
+        }
+    } else if (tpl) {
+        appfw_mcp_resp_addf(resp, "template 必须是名称或 0..3");
+        return 1;
+    }
+
+    const char *name = (cJSON_IsString(nm) && nm->valuestring[0])
+                           ? nm->valuestring : "自定义";
+    kbmic_config_t work = *kbmic_config_current();
+    const int idx = kbmic_config_create_profile(&work, name, (uint8_t)base);
+    if (idx < 0) {
+        appfw_mcp_resp_addf(resp, "创建失败:模板无效或模式已满(%d)",
+                            KBMIC_MAX_PROFILES);
+        return 1;
+    }
+    if (!cJSON_IsFalse(act)) work.active = (uint8_t)idx;
+    kbmic_config_commit(&work);
+    appfw_mcp_resp_addf(resp, "已从 %s 创建自定义模式 [%d]%s%s",
+                        work.profiles[base].name, idx, work.profiles[idx].name,
+                        work.active == (uint8_t)idx ? ",并已激活" : "");
+    return 0;
+}
+
 static int tool_set_active_mode(cJSON *args, appfw_mcp_resp_t *resp)
 {
     const cJSON *idx = cJSON_GetObjectItemCaseSensitive(args, "index");
@@ -292,6 +436,10 @@ static int tool_rename_mode(cJSON *args, appfw_mcp_resp_t *resp)
         appfw_mcp_resp_addf(resp, "index 越界");
         return 1;
     }
+    if (builtin_index(idx->valueint)) {
+        appfw_mcp_resp_addf(resp, "内置模式只读，不能改名");
+        return 1;
+    }
     snprintf(work.profiles[idx->valueint].name, KBMIC_NAME_MAX, "%s", nm->valuestring);
     kbmic_config_commit(&work);
     appfw_mcp_resp_addf(resp, "模式 %d 已改名 %s", idx->valueint, nm->valuestring);
@@ -318,11 +466,15 @@ static int tool_reset_mode(cJSON *args, appfw_mcp_resp_t *resp)
 static int tool_set_key(cJSON *args, appfw_mcp_resp_t *resp)
 {
     const cJSON *idx = cJSON_GetObjectItemCaseSensitive(args, "index");
-    const cJSON *btn = cJSON_GetObjectItemCaseSensitive(args, "button");
-    const cJSON *slot = cJSON_GetObjectItemCaseSensitive(args, "slot");
-    if (!cJSON_IsNumber(idx) || !cJSON_IsNumber(btn) || !cJSON_IsNumber(slot)) {
+    const int btn = parse_button_arg(cJSON_GetObjectItemCaseSensitive(args, "button"));
+    const int slot = parse_slot_arg(cJSON_GetObjectItemCaseSensitive(args, "slot"));
+    if (!cJSON_IsNumber(idx) || btn < 0 || slot < 0) {
         appfw_mcp_resp_addf(resp, "参数 index/button/slot(number)缺失"
                                   "(button:0=Up 1=Down 2=OK;slot:0=短按 1=双击 2=长按)");
+        return 1;
+    }
+    if (builtin_index(idx->valueint)) {
+        appfw_mcp_resp_addf(resp, "内置模式只读，不能修改键位；请先创建自定义模式");
         return 1;
     }
     const cJSON *preset = cJSON_GetObjectItemCaseSensitive(args, "preset");
@@ -377,7 +529,7 @@ static int tool_set_key(cJSON *args, appfw_mcp_resp_t *resp)
 
     // 普通动作在长按槽强制 LONG 触发:否则阈值到点后没人收尾,按住不放会一直重复。
     // Apple Fn/Consumer 是“按下保持、松手释放”的 TAP 语义,必须保留原触发。
-    if (slot->valueint == KBMIC_SLOT_LONG &&
+    if (slot == KBMIC_SLOT_LONG &&
         action.trigger == KBMIC_TRIG_TAP &&
         !(action.step_count == 1 &&
           (action.steps[0].kind == KBMIC_STEP_APPLEFN ||
@@ -385,23 +537,21 @@ static int tool_set_key(cJSON *args, appfw_mcp_resp_t *resp)
         action.trigger = KBMIC_TRIG_LONG;
     }
     // 双击槽同理强制 DOUBLE(动作本体照发,只是触发语义跟槽走)。
-    if (slot->valueint == KBMIC_SLOT_DOUBLE) {
+    if (slot == KBMIC_SLOT_DOUBLE) {
         action.trigger = KBMIC_TRIG_DOUBLE;
     }
     kbmic_config_t work = *kbmic_config_current();
-    if (idx->valueint < 0 || idx->valueint >= work.count ||
-        btn->valueint < 0 || btn->valueint >= KBMIC_BTN_COUNT ||
-        slot->valueint < 0 || slot->valueint >= KBMIC_SLOT_COUNT) {
+    if (idx->valueint < 0 || idx->valueint >= work.count) {
         appfw_mcp_resp_addf(resp, "index/button/slot 越界");
         return 1;
     }
-    work.profiles[idx->valueint].slots[btn->valueint][slot->valueint] = action;
+    work.profiles[idx->valueint].slots[btn][slot] = action;
     kbmic_config_commit(&work);
 
     char name[KBMIC_ACTION_NAME_MAX];
     appfw_mcp_resp_addf(resp, "模式 [%d]%s %s/%s 已设为 %s",
                         idx->valueint, work.profiles[idx->valueint].name,
-                        btn_name(btn->valueint), slot_name(slot->valueint),
+                        btn_name(btn), slot_name(slot),
                         kbmic_action_name(&action, name, sizeof(name)));
     return 0;
 }
@@ -636,6 +786,14 @@ static int tool_radio(cJSON *args, appfw_mcp_resp_t *resp)
 static const appfw_mcp_tool_t k_tools[] = {
     { "kbmic_get_config", "查看键盘配置(全部模式的按键分配)",
       "{}", tool_get_config },
+    { "kbmic_list_modes", "轻量列出模式数量、当前模式、内置/自定义标记",
+      "{}", tool_list_modes },
+    { "kbmic_get_mode", "查询单个模式的 9 个槽位定义",
+      "{\"type\":\"object\",\"properties\":{\"index\":{\"type\":\"integer\"}},\"required\":[\"index\"]}",
+      tool_get_mode },
+    { "kbmic_create_mode", "从内置模板创建自定义模式，可选立即激活。template=Mac/Windows/Android/iOS 或 0..3",
+      "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"template\":{\"type\":[\"string\",\"integer\"]},\"activate\":{\"type\":\"boolean\"}}}",
+      tool_create_mode },
     { "kbmic_set_active_mode", "切换当前生效的键盘模式",
       "{\"type\":\"object\",\"properties\":{\"index\":{\"type\":\"integer\"}},\"required\":[\"index\"]}",
       tool_set_active_mode },
@@ -646,16 +804,16 @@ static const appfw_mcp_tool_t k_tools[] = {
       "{\"type\":\"object\",\"properties\":{\"index\":{\"type\":\"integer\"}},\"required\":[\"index\"]}",
       tool_delete_mode },
     { "kbmic_rename_mode", "重命名一个模式",
-      "{\"type\":\"object\",\"properties\":{\"index\":{\"type\":\"integer\"},\"name\":{\"type\":\"string\"}},\"required\":[\"index\",\"name\"]}",
+      "{\"type\":\"object\",\"properties\":{\"index\":{\"type\":\"integer\",\"minimum\":4},\"name\":{\"type\":\"string\"}},\"required\":[\"index\",\"name\"]}",
       tool_rename_mode },
     { "kbmic_reset_mode", "把内置模式恢复出厂默认",
       "{\"type\":\"object\",\"properties\":{\"index\":{\"type\":\"integer\"}},\"required\":[\"index\"]}",
       tool_reset_mode },
-    { "kbmic_set_key", "设置某模式某键某槽的动作。preset=目录 id/名字(先 kbmic_action_catalog 查看)"
+    { "kbmic_set_key", "设置自定义模式某键某槽的动作；index 0..3 是内置只读。preset=目录 id/名字(先 kbmic_action_catalog 查看)"
                        "或 steps=[{kind:\"key\"|\"consumer\"|\"delay\"|\"applefn\",mods:\"Ctrl+Shift\",keycode,usage,delay_ms}]"
                        "(≤4步);button:0=Up 1=Down 2=OK;slot:0=短按 1=双击 2=长按;trigger 可覆盖触发方式",
-      "{\"type\":\"object\",\"properties\":{\"index\":{\"type\":\"integer\"},\"button\":{\"type\":\"integer\"},"
-      "\"slot\":{\"type\":\"integer\"},\"preset\":{},\"trigger\":{},\"steps\":{\"type\":\"array\"}},"
+      "{\"type\":\"object\",\"properties\":{\"index\":{\"type\":\"integer\"},\"button\":{\"type\":[\"integer\",\"string\"]},"
+      "\"slot\":{\"type\":[\"integer\",\"string\"]},\"preset\":{},\"trigger\":{},\"steps\":{\"type\":\"array\"}},"
       "\"required\":[\"index\",\"button\",\"slot\"]}",
       tool_set_key },
     { "kbmic_action_catalog", "列出内置动作目录(id 与名字,供 kbmic_set_key 的 preset 用)",

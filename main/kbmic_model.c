@@ -211,6 +211,24 @@ int kbmic_config_add_profile(kbmic_config_t *cfg, const char *name)
     return idx;
 }
 
+int kbmic_config_create_profile(kbmic_config_t *cfg, const char *name,
+                                uint8_t base_index)
+{
+    if (cfg == NULL || cfg->count >= KBMIC_MAX_PROFILES ||
+        base_index >= KBMIC_BUILTIN_MODES || base_index >= cfg->count) {
+        return -1;
+    }
+
+    const uint8_t idx = cfg->count;
+    kbmic_profile_t *p = &cfg->profiles[idx];
+    *p = cfg->profiles[base_index];
+    p->builtin = 0;
+    strncpy(p->name, (name && *name) ? name : "自定义", KBMIC_NAME_MAX - 1);
+    p->name[KBMIC_NAME_MAX - 1] = '\0';
+    cfg->count = idx + 1;
+    return idx;
+}
+
 int kbmic_config_delete_profile(kbmic_config_t *cfg, uint8_t index)
 {
     if (cfg == NULL || index >= cfg->count || cfg->profiles[index].builtin) {

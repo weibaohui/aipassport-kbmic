@@ -53,13 +53,13 @@ Action names are generated in both C and Python and must match byte for byte; ho
 
 The 240×320 home page shows three key cards, the active profile, BLE connection state, battery level, speaking/holding state, and the latest key feedback.
 
-Long-press OK opens the framework settings menu, which includes screen timeout, brightness, and the Keyboard shortcuts entry. That application page has three views:
+Long-press OK opens the framework settings menu, which includes screen timeout, brightness, device info, provisioning, and the Button modes entry. That application page has three views:
 
 1. **Profile list**—select a profile or create a user profile.
 2. **Key mapping**—3 buttons × 3 slots.
 3. **Action picker**—17 built-in presets, including Enter, Backspace, Tab, Space, Escape, Globe, Ctrl+Win, arrows, F1/F2, Enter ×3, settings, and Apple Fn.
 
-Up/Down move the cursor and OK selects. A `< Back` row moves up one level; long press OK exits the keyboard settings view. Chinese profile names are supported by the bundled font subset.
+Up/Down move the cursor and OK selects. A `< Back` row moves up one level; long press OK exits the keyboard settings view. The on-device profile list is read-only for creation; use MCP or AI to add a profile. Chinese profile names are supported by the bundled font subset.
 
 ## Configuration channels
 

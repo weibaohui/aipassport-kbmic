@@ -296,6 +296,24 @@ static void test_add_delete(void)
     CHECK(kbmic_config_valid(&cfg));
 }
 
+static void test_create_from_template(void)
+{
+    kbmic_config_t cfg;
+    kbmic_config_defaults(&cfg);
+    const int idx = kbmic_config_create_profile(&cfg, "游戏", 1);
+    CHECK(idx == KBMIC_BUILTIN_MODES);
+    CHECK(cfg.count == KBMIC_BUILTIN_MODES + 1);
+    CHECK(kbmic_config_valid(&cfg));
+    CHECK_STR(cfg.profiles[idx].name, "游戏");
+    CHECK(cfg.profiles[idx].builtin == 0);
+    CHECK(memcmp(cfg.profiles[idx].slots, cfg.profiles[1].slots,
+                 sizeof(cfg.profiles[idx].slots)) == 0);
+
+    CHECK(kbmic_config_create_profile(&cfg, "Bad", KBMIC_BUILTIN_MODES) == -1);
+    CHECK(kbmic_config_create_profile(&cfg, "Bad", KBMIC_MAX_PROFILES) == -1);
+    CHECK(cfg.count == KBMIC_BUILTIN_MODES + 1);
+}
+
 static void test_reset(void)
 {
     kbmic_config_t cfg;
@@ -326,6 +344,7 @@ int main(void)
     test_v2_migration();
     test_validation();
     test_add_delete();
+    test_create_from_template();
     test_reset();
 
     if (failures) {

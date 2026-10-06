@@ -31,7 +31,7 @@
 #include "nvs_flash.h"
 
 #define KEY_QUEUE_LEN          16
-#define KEY_TASK_STACK         4096
+#define KEY_TASK_STACK         6144
 #define KEY_TASK_PRIORITY      5
 // 实测 BLE HID/GATT/UI 启动后 free≈80KB、largest≈70KB。
 // 先用保守门槛实验 Wi-Fi STA + 轻量 MCP；portal/web 仍只能按需启动。
@@ -298,7 +298,8 @@ static void config_changed(void)
 }
 
 static const appfw_menu_nav_t s_menu_navs[] = {{
-    .label = "键盘快捷键",
+    .label = "按键模式",
+    .symbol = LV_SYMBOL_SETTINGS,
     .enter = kbmic_nav_enter,
     .build = kbmic_nav_build,
     .poll = kbmic_nav_poll,
@@ -381,7 +382,8 @@ void app_main(void)
         .home_poll = kbmic_home_poll,
         .full_key = full_key,
         .menu_show_mask = APPFW_MENU_ITEM_SCREEN_OFF | APPFW_MENU_ITEM_BRIGHTNESS |
-                          APPFW_MENU_ITEM_PROVISIONING,
+                          APPFW_MENU_ITEM_PROVISIONING |
+                          APPFW_MENU_ITEM_DEVICE_INFO,
         .menu_navs = s_menu_navs,
         .menu_navs_count = 1,
         .menu_open_btn = 0xFF,

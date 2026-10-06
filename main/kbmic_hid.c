@@ -78,23 +78,59 @@ static esp_hid_device_config_t s_hid_config = {
 static esp_hidd_dev_t *s_hid_dev;
 static bool s_connected;
 static bool s_boot_notify;
+// Legacy advertising packet: Flags + HID Service UUID + Keyboard Appearance.
+static uint8_t s_adv_raw[] = {
+    0x02, 0x01, 0x06,        // Flags: General Discoverable, BR/EDR unsupported
+    0x03, 0x03, 0x12, 0x18,  // Complete List of 16-bit Service UUIDs: HID
+    0x03, 0x19, 0xC1, 0x03,  // Appearance: Keyboard
+};
+// Scan response: Complete Local Name "AI小键盘" (UTF-8).
+static uint8_t s_scan_rsp_raw[] = {
+    0x0C, 0x09, 'A', 'I',
+    0xE5, 0xB0, 0x8F,        // 小
+    0xE9, 0x94, 0xAE,        // 键
+    0xE7, 0x9B, 0x98,        // 盘
+};
+static uint8_t s_raw_config_done;
+static esp_ble_adv_params_t s_adv_params = {
+    .adv_int_min = 0x20,
+    .adv_int_max = 0x30,
+    .adv_type = ADV_TYPE_IND,
+    .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
+    .channel_map = ADV_CHNL_ALL,
+    .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
+};
 
 static void gap_adv_start(void)
 {
-    static const esp_ble_adv_params_t adv_params = {
-        .adv_int_min = 0x20,
-        .adv_int_max = 0x30,
-        .adv_type = ADV_TYPE_IND,
-        .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
-        .channel_map = ADV_CHNL_ALL,
-        .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
-    };
-    (void)esp_ble_gap_start_advertising((esp_ble_adv_params_t *)&adv_params);
+    s_raw_config_done = 0x03;
+    const esp_err_t adv_ret = esp_ble_gap_config_adv_data_raw(
+        s_adv_raw, sizeof(s_adv_raw));
+    const esp_err_t scan_ret = esp_ble_gap_config_scan_rsp_data_raw(
+        s_scan_rsp_raw, sizeof(s_scan_rsp_raw));
+    ESP_LOGI(TAG, "config raw adv ret=%s scan-rsp=%s",
+             esp_err_to_name(adv_ret), esp_err_to_name(scan_ret));
+    if (adv_ret == ESP_OK && scan_ret == ESP_OK) return;
+    if (adv_ret != ESP_OK || scan_ret != ESP_OK) {
+        ESP_LOGE(TAG, "raw advertising configuration failed; not advertising");
+    }
 }
 
 static void gap_ble_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
 {
     switch (event) {
+    case ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT:
+        s_raw_config_done &= ~0x01;
+        if (!s_raw_config_done) {
+            (void)esp_ble_gap_start_advertising(&s_adv_params);
+        }
+        break;
+    case ESP_GAP_BLE_SCAN_RSP_DATA_RAW_SET_COMPLETE_EVT:
+        s_raw_config_done &= ~0x02;
+        if (!s_raw_config_done) {
+            (void)esp_ble_gap_start_advertising(&s_adv_params);
+        }
+        break;
     case ESP_GAP_BLE_AUTH_CMPL_EVT:
         ESP_LOGI(TAG, "配对%s", param->ble_security.auth_cmpl.success ? "成功" : "失败");
         break;

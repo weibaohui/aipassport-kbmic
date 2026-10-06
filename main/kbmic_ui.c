@@ -175,6 +175,12 @@ static nav_layer_t s_nav_view;
 static int s_nav_cursor[NAV_LAYER_N];
 static int s_nav_btn, s_nav_slot;      // NAV_ACT 正在改哪个槽
 
+static bool nav_active_builtin(void)
+{
+    const kbmic_config_t *cfg = kbmic_config_current();
+    return cfg->profiles[cfg->active].builtin != 0;
+}
+
 static lv_obj_t *s_nv_rows[NV_ROWS_MAX][2];
 static lv_obj_t *s_nv_footer;
 
@@ -202,8 +208,7 @@ static int nav_rows(void)
     switch (s_nav_view) {
     case NAV_MODES: {
         const int n = kbmic_config_current()->count;
-        const int extra = (n < KBMIC_MAX_PROFILES) ? 1 : 0;   // "+ 新建模式"
-        return 1 + n + extra;
+        return 1 + n;
     }
     case NAV_KEYS: return 1 + KBMIC_BTN_COUNT * KBMIC_SLOT_COUNT;
     case NAV_ACT: {
@@ -241,8 +246,6 @@ static void nav_row_text(int row, nav_row_t *out)
                      (cfg->profiles[idx].builtin ? "内置" : "自定义"),
                      idx == (int)cfg->active ? "" :
                      (cfg->profiles[idx].builtin ? "" : ""));
-        } else {
-            snprintf(out->left, sizeof(out->left), "+ 新建模式");
         }
         break;
     }
@@ -305,8 +308,13 @@ void kbmic_nav_poll(void)
         lv_obj_set_style_text_color(s_nv_rows[i][0],
                                     lv_color_hex(r.sel ? UI_ACCENT : UI_FG), 0);
     }
-    lv_label_set_text_fmt(s_nv_footer, "%s  上=1行 OK=选中 长按OK=退出",
-                          k_title[s_nav_view]);
+    if (s_nav_view == NAV_MODES) {
+        lv_label_set_text(s_nv_footer,
+                          "如需新增，请用 AI  上=1行 OK=选中");
+    } else {
+        lv_label_set_text_fmt(s_nv_footer, "%s  上=1行 OK=选中 长按OK=退出",
+                              k_title[s_nav_view]);
+    }
 }
 
 // 返回 false 让框架退回设置菜单;层内导航自己消化。
@@ -333,26 +341,17 @@ bool kbmic_nav_key(int btn, int ev)
             case NAV_MODES: {
                 kbmic_config_t work = *kbmic_config_current();
                 const int idx = cur - 1;
-                if (idx >= work.count) {               // "+ 新建模式"
-                    char name[KBMIC_NAME_MAX];
-                    snprintf(name, sizeof(name), "自定义%d",
-                             work.count - KBMIC_BUILTIN_MODES + 1);
-                    const int ni = kbmic_config_add_profile(&work, name);
-                    if (ni >= 0) {
-                        work.active = (uint8_t)ni;
-                        kbmic_config_commit(&work);
-                        s_nav_cursor[NAV_MODES] = ni + 1;
-                        ESP_LOGI(TAG, "新建模式 %s(#%d)", name, ni);
-                    }
-                } else {                                // 选用
-                    work.active = (uint8_t)idx;
-                    kbmic_config_commit(&work);
-                    ESP_LOGI(TAG, "切换到模式 %s", work.profiles[idx].name);
-                }
+                work.active = (uint8_t)idx;
+                kbmic_config_commit(&work);
+                ESP_LOGI(TAG, "切换到模式 %s", work.profiles[idx].name);
                 break;
             }
             case NAV_KEYS: {
                 const int idx = cur - 1;
+                if (nav_active_builtin()) {
+                    kbmic_ui_set_feedback("内置模式只读，请改自定义模式", false);
+                    break;
+                }
                 s_nav_btn = idx / KBMIC_SLOT_COUNT;
                 s_nav_slot = idx % KBMIC_SLOT_COUNT;
                 s_nav_view = NAV_ACT;

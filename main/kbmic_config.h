@@ -138,6 +138,11 @@ bool kbmic_config_valid(const kbmic_config_t *cfg);
 // 追加一个空模式,返回新索引;已满返回 -1。名字按 UTF-8 截断到 15 字节。
 int kbmic_config_add_profile(kbmic_config_t *cfg, const char *name);
 
+// 从某个内置模板追加自定义模式;base_index 必须是 0..KBMIC_BUILTIN_MODES-1。
+// 键位整体复制模板,builtin 清零,名字按 UTF-8 截断;成功返回新索引。
+int kbmic_config_create_profile(kbmic_config_t *cfg, const char *name,
+                                uint8_t base_index);
+
 // 删除一个**非内置**模式;成功返回 0,内置或越界返回 -1。
 int kbmic_config_delete_profile(kbmic_config_t *cfg, uint8_t index);
 
