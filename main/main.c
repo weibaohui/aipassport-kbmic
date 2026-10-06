@@ -43,8 +43,9 @@ static void on_button_event(bsp_btn_t button, bsp_btn_ev_t event, void *user)
 
 static void report_result(const char *action, esp_err_t err)
 {
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "%s 发送失败: %s", action, esp_err_to_name(err));
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "%s HID 报告失败: %s (connected=%d)", action,
+                 esp_err_to_name(err), kbmic_hid_connected());
     }
 }
 

@@ -95,6 +95,9 @@ static const uint8_t s_map_keyboard[] = {
     // 这里**不能**再插 5 bit + 3 bit 的填充项:modifiers + Fn + 6 keys 已经是
     // 8 字节。多加填充会让 esp_hid 描述符解析器拒绝或产生错误报告长度。
 
+    // Apple Fn 改用了 vendor usage page 0xFF；切回标准键盘 usage page，
+    // 否则下面的 0x28/0x2A 会被解释为厂商自定义 usage，macOS 不会产生按键。
+    0x05, 0x07,        //   Usage Page (Key Codes)
     0x95, 0x06,        //   Report Count (6)
     0x75, 0x08,        //   Report Size (8)
     0x15, 0x00,        //   Logical Minimum (0)
