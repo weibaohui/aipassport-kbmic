@@ -5,12 +5,10 @@
 //   2. 本文件自带的 GAP 薄层负责 BT controller / Bluedroid 启动、配对与广播
 //      (官方例程里叫 esp_hid_gap.c,但那份同时含经典蓝牙扫描与 HID host,
 //       本应用只需要广播这一侧,所以只取必要部分自己写);
-//   3) 对外的发送接口,内部把 8 字节键盘报告 / 2 字节 Consumer 报告发到
-//      各自那张 report map。
+//   3) 对外发送 8 字节键盘报告(第 2 字节为 Apple Fn)。
 #include "kbmic_hid.h"
 
 #include "kbmic_config.h"
-#include "kbmic_store.h"
 
 #include <inttypes.h>
 #include <string.h>
@@ -25,7 +23,6 @@
 #include "esp_hid_common.h"
 #include "esp_hidd.h"
 #include "esp_hidd_gatts.h"
-#include "kbmic_ble_svc.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -71,28 +68,21 @@ static const char *TAG = "kbmic_hid";
 // 报告描述符
 // ---------------------------------------------------------------------------
 
-// report map 0:标准 8 字节键盘报告(boot 布局:1B 修饰键 + 1B 保留 + 6B 键码)。
-// 报告 ID 与描述符里的 0x85 项一致;esp_hid 按 id 定位要发送的特征。
-#define KBMIC_REPORT_ID_KEYBOARD 1
-#define KBMIC_REPORT_ID_CONSUMER 2
-
-// 单一 report map(一个 HID 服务):键盘报告 ID1(内嵌 Apple Fn 字节)
-// + 消费报告 ID2。与在 macOS 上验证可用的 NordicBTKeyBridge 完全同构;
-// 报文带 ID 前缀,esp-idf esp_hid 组件已按 HOGP 规范把特征长度补成
-// 「位宽/8 + 1」(本机补丁),前缀报文与特征长度严格匹配。
+// 唯一报告映射：8 字节键盘报告，依次为 modifier、Apple Fn、6 个键码。
+// 本调试固件不声明 Report ID，输入报告在键盘特征中直接发送 8 字节。
 static const uint8_t s_map_keyboard[] = {
     0x05, 0x01,        // Usage Page (Generic Desktop)
     0x09, 0x06,        // Usage (Keyboard)
     0xA1, 0x01,        // Collection (Application)
-    0x85, 0x01,        //   Report ID (1)
     0x05, 0x07,        //   Usage Page (Key Codes)
-    0x19, 0xE0,        //   Usage Minimum (224)
-    0x29, 0xE7,        //   Usage Maximum (231)
+
+    0x19, 0xE0,        //   Usage Minimum (224 = LeftControl)
+    0x29, 0xE7,        //   Usage Maximum (231 = RightGUI)
     0x15, 0x00,        //   Logical Minimum (0)
     0x25, 0x01,        //   Logical Maximum (1)
     0x75, 0x01,        //   Report Size (1)
     0x95, 0x08,        //   Report Count (8)
-    0x81, 0x02,        //   Input (Data,Var,Abs)   -> 修饰键
+    0x81, 0x02,        //   Input (Data,Var,Abs)      -> 修饰键字节
 
     0x05, 0xFF,        //   Usage Page (AppleVendor Top Case)
     0x09, 0x03,        //   Usage (KeyboardFn)
@@ -100,7 +90,10 @@ static const uint8_t s_map_keyboard[] = {
     0x25, 0x01,        //   Logical Maximum (1)
     0x75, 0x08,        //   Report Size (8)
     0x95, 0x01,        //   Report Count (1)
-    0x81, 0x02,        //   Input (Data,Var,Abs)   -> Apple Fn 字节
+    0x81, 0x02,        //   Input (Data,Var,Abs)       -> Apple Fn 字节(报告第 2 字节)
+
+    // 这里**不能**再插 5 bit + 3 bit 的填充项:modifiers + Fn + 6 keys 已经是
+    // 8 字节。多加填充会让 esp_hid 描述符解析器拒绝或产生错误报告长度。
 
     0x95, 0x06,        //   Report Count (6)
     0x75, 0x08,        //   Report Size (8)
@@ -108,57 +101,38 @@ static const uint8_t s_map_keyboard[] = {
     0x25, 0xDD,        //   Logical Maximum (221)
     0x19, 0x00,        //   Usage Minimum (0)
     0x29, 0xDD,        //   Usage Maximum (221)
-    0x81, 0x00,        //   Input (Data,Array)    -> 6 键码
+    0x81, 0x00,        //   Input (Data,Array)        -> 6 个键码
 
     0x05, 0x08,        //   Usage Page (LEDs)
-    0x19, 0x01,        //   Usage Minimum (1)
-    0x29, 0x05,        //   Usage Maximum (5)
+    0x19, 0x01,        //   Usage Minimum (1 = NumLock)
+    0x29, 0x05,        //   Usage Maximum (5 = Kana)
     0x75, 0x01,        //   Report Size (1)
     0x95, 0x05,        //   Report Count (5)
-    0x91, 0x02,        //   Output (Data,Var,Abs) -> LED
+    0x91, 0x02,        //   Output (Data,Var,Abs)     -> 主机发来的 LED 状态
+    //                        ↑ 必须是 0x91(Output),不是 0x81(Input)。写成 0x81
+    //                          会把这 5 bit 算进 Input 报告,Input 变成 69 bit
+    //                          而非 64 bit —— 同样表现为解析失败 + panic 重启。
+
     0x75, 0x03,        //   Report Size (3)
     0x95, 0x01,        //   Report Count (1)
-    0x91, 0x01,        //   Output (Cnst)         -> LED 填充
-    0xC0               // End Collection
-};
+    0x91, 0x03,        //   Output (Cnst,Var,Abs)     -> 3 bit 填充
 
-// report map 1:Consumer Control 报告。这里只声明 Globe 0x029D 这一个 16 位 usage。
-//
-// ⚠️ 16 位 usage 的编码陷阱:HID 的 Usage Min/Max 按 item 的低 2 位定长度
-// (0→0 字节、1→1 字节、2→2 字节、3→4 字节)。Usage Maximum 的三种编码是
-// 0x29=1 字节 / 0x2A=2 字节 / 0x2B=4 字节。写成 0x29, 0x9D, 0x02 的话,
-// 解析器只吃掉 0x9D,后面的 0x02 会被当成下一个 item 的命令码,整个描述符
-// 从此错位 —— 表现为 esp_hid 报 "INPUT report does not amount to full bytes"
-// 然后 panic,设备开机无限重启。要 16 位值就得用 0x1A / 0x2A。
-//
-// 用 16 位 Array 布局而不是官方例程那种位域:Globe 是单值 usage,Array 把 usage
-// 原样放进报告,主机侧不需要理解任何自定义位含义。
-static const uint8_t s_map_consumer[] = {
-    0x05, 0x0C,        // Usage Page (Consumer)
-    0x09, 0x01,        // Usage (Consumer Control)
-    0xA1, 0x01,        // Collection (Application)
-    0x85, 0x02,        //   Report ID (2)
-    0x15, 0x00,        //   Logical Minimum (0)
-    0x26, 0xFF, 0x03,  //   Logical Maximum (0x03FF)
-    0x19, 0x00,        //   Usage Minimum (0)
-    0x2A, 0xFF, 0x03,  //   Usage Maximum (0x03FF)
-    0x75, 0x10,        //   Report Size (16)
-    0x95, 0x01,        //   Report Count (1)
-    0x81, 0x00,        //   Input (Data,Array)
     0xC0               // End Collection
 };
 
 static esp_hid_raw_report_map_t s_report_maps[] = {
     { .data = s_map_keyboard, .len = sizeof(s_map_keyboard) },
-    { .data = s_map_consumer, .len = sizeof(s_map_consumer) },
 };
 
 #define KBMIC_MAP_KEYBOARD 0
-#define KBMIC_MAP_CONSUMER 1
 
 static esp_hid_device_config_t s_hid_config = {
-    .vendor_id = 0x16C0,   // pid.codes 公共 VID,避免冒用任何厂商的 ID
-    .product_id = 0x27DB,
+    // 仿冒 Apple Magic Keyboard(与 Keychron Mac 模式同款做法):macOS 对
+    // 原生 ID 走完整键盘路径(Fn/Globe/全部按键);自造 VID/PID 曾被当
+    // 杂牌键盘处理,服务识别正常但输入事件被吞(2026-10-06 真机对照:
+    // 同 Mac 上 Keychron 以此 ID 工作正常)。
+    .vendor_id = 0x05AC,
+    .product_id = 0x024F,
     .version = 0x0100,
     .device_name = KBMIC_BLE_DEVICE_NAME,
     .manufacturer_name = KBMIC_BLE_MANUFACTURER,
@@ -169,8 +143,6 @@ static esp_hid_device_config_t s_hid_config = {
 
 static esp_hidd_dev_t *s_hid_dev;
 static bool s_connected;
-// 配置服务还没起来时(它依赖 esp_hidd_dev_init 先跑完)不发事件,避免空指针。
-static bool s_boot_notify;
 
 // ---------------------------------------------------------------------------
 // GAP 薄层:广播与配对
@@ -326,22 +298,10 @@ static void hid_event_cb(void *handler_args, esp_event_base_t base, int32_t id, 
     case ESP_HIDD_START_EVENT:
         ESP_LOGI(TAG, "HID 协议栈就绪,开始广播 \"%s\"", KBMIC_BLE_DEVICE_NAME);
         gap_adv_start();
-        // 配置服务在这里才注册:esp_hid 内部电池/设备信息/HID 三个服务的
-        // 建表链到本事件才走完,更早注册会与它并发建表,GATT 返回 133
-        // (2026-10-05 真机踩坑)。注册本身投递到 svc 任务执行 —— 本回调
-        // 跑在 esp_hid 的 4KB 事件任务里,深调用链会把栈压穿。失败不阻塞:
-        // 键盘照常用,只是 MCP 配不了。
-        kbmic_ble_svc_request_register();
         break;
     case ESP_HIDD_CONNECT_EVENT:
         s_connected = true;
-        ESP_LOGI(TAG, "主机已连接");
-        // 主动报一次当前模式:订阅了事件通道的客户端(通常是 MCP)一连上就知道
-        // 设备现在是什么状态,不用先发一轮读。
-        if (s_boot_notify) {
-            const kbmic_config_t *cfg = kbmic_config_current();
-            kbmic_ble_svc_notify(KBMIC_EV_BOOT, cfg->active, 0, cfg->profiles[cfg->active].name);
-        }
+        ESP_LOGI(TAG, "Mac/主机已连接");
         break;
     case ESP_HIDD_DISCONNECT_EVENT:
         s_connected = false;
@@ -372,19 +332,18 @@ esp_err_t kbmic_hid_init(void)
         return ret;
     }
 
-    // GATTS 全局分发回调必须装在 Bluedroid enable 之后(已在 gap_stack_init
-    // 里起来)、任何 GATTS app 注册之前 —— esp_hidd_dev_init 内部马上会注册
-    // 3 个 app,晚一步 REG/建表事件就无人接收,HID 永远起不来。
-    ret = kbmic_ble_svc_install_dispatch();
+    // 注册 ESP-IDF HID 的 GATTS 事件处理器；不再启动额外的配置服务分发任务。
+    ret = esp_ble_gatts_register_callback(esp_hidd_gatts_event_handler);
     if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "HID GATTS 回调注册失败: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    if ((ret = esp_hidd_dev_init(&s_hid_config, ESP_HID_TRANSPORT_BLE, hid_event_cb, &s_hid_dev)) != ESP_OK) {
+    ret = esp_hidd_dev_init(&s_hid_config, ESP_HID_TRANSPORT_BLE, hid_event_cb, &s_hid_dev);
+    if (ret != ESP_OK) {
         ESP_LOGE(TAG, "HID 设备初始化失败: %s", esp_err_to_name(ret));
         return ret;
     }
-    s_boot_notify = true;
     return ESP_OK;
 }
 
@@ -393,69 +352,31 @@ bool kbmic_hid_connected(void)
     return s_connected && esp_hidd_dev_connected(s_hid_dev);
 }
 
-esp_err_t kbmic_hid_set_battery(int percent)
-{
-    if (percent < 0) percent = 0;
-    if (percent > 100) percent = 100;
-    if (s_hid_dev == NULL) return ESP_ERR_INVALID_STATE;
-    return esp_hidd_dev_battery_set(s_hid_dev, (uint8_t)percent);
-}
-
-esp_err_t kbmic_hid_key_hold(uint8_t modifier, uint8_t apple_fn, uint8_t keycode, bool pressed)
+esp_err_t kbmic_hid_key_hold(uint8_t modifier, uint8_t keycode, bool pressed)
 {
     if (s_hid_dev == NULL || !kbmic_hid_connected()) return ESP_ERR_INVALID_STATE;
-    uint8_t report[9] = {0};
-    report[0] = KBMIC_REPORT_ID_KEYBOARD;          // 线上前缀 = Report ID
+    uint8_t report[8] = {0};
     if (pressed) {
-        report[1] = modifier;
-        report[2] = apple_fn ? 0x01 : 0x00;        // Apple Fn 字节(第 2 字节)
-        report[3] = keycode;
+        report[0] = modifier;
+        report[2] = keycode;
     }
-    return esp_hidd_dev_input_set(s_hid_dev, KBMIC_MAP_KEYBOARD, KBMIC_REPORT_ID_KEYBOARD, report, sizeof(report));
+    return esp_hidd_dev_input_set(s_hid_dev, KBMIC_MAP_KEYBOARD, 0, report, sizeof(report));
+}
+
+esp_err_t kbmic_hid_applefn(bool pressed)
+{
+    if (s_hid_dev == NULL || !kbmic_hid_connected()) return ESP_ERR_INVALID_STATE;
+    uint8_t report[8] = {0};
+    if (pressed) {
+        report[1] = 0x01;
+    }
+    return esp_hidd_dev_input_set(s_hid_dev, KBMIC_MAP_KEYBOARD, 0, report, sizeof(report));
 }
 
 esp_err_t kbmic_hid_tap(uint8_t modifier, uint8_t keycode)
 {
-    esp_err_t ret = kbmic_hid_key_hold(modifier, 0, keycode, true);
+    esp_err_t ret = kbmic_hid_key_hold(modifier, keycode, true);
     if (ret != ESP_OK) return ret;
     vTaskDelay(pdMS_TO_TICKS(KBMIC_TAP_HOLD_MS));
-    return kbmic_hid_key_hold(0, 0, 0, false);
-}
-
-esp_err_t kbmic_hid_consumer(uint16_t usage, bool pressed)
-{
-    if (s_hid_dev == NULL || !kbmic_hid_connected()) return ESP_ERR_INVALID_STATE;
-    uint8_t report[3] = {0};
-    report[0] = KBMIC_REPORT_ID_CONSUMER;          // 线上前缀 = Report ID
-    if (pressed) {
-        report[1] = (uint8_t)(usage & 0xFF);       // 16 位小端
-        report[2] = (uint8_t)(usage >> 8);
-    }
-    return esp_hidd_dev_input_set(s_hid_dev, KBMIC_MAP_CONSUMER, KBMIC_REPORT_ID_CONSUMER, report, sizeof(report));
-}
-
-// ---------------------------------------------------------------------------
-// 蓝牙复位(排障)
-// ---------------------------------------------------------------------------
-esp_err_t kbmic_hid_reset_bonds(void)
-{
-    int n = 0;
-    if (esp_ble_get_bond_device_list(&n, NULL) != ESP_OK || n <= 0) {
-        n = 0;
-    }
-    esp_ble_bond_dev_t list[8];
-    if (n > 8) n = 8;
-    if (n > 0 && esp_ble_get_bond_device_list(&n, list) != ESP_OK) {
-        n = 0;
-    }
-    int removed = 0;
-    for (int i = 0; i < n; i++) {
-        if (esp_ble_remove_bond_device(list[i].bd_addr) == ESP_OK) removed++;
-    }
-    // 删绑定后旧链路很快失效;停广播再重开,强制对端刷新并回到可连接态。
-    esp_ble_gap_stop_advertising();
-    vTaskDelay(pdMS_TO_TICKS(100));
-    gap_adv_start();
-    ESP_LOGW(TAG, "蓝牙绑定已清(%d 台),设备重新广播;主机侧请忽略后重配", removed);
-    return ESP_OK;
+    return kbmic_hid_key_hold(0, 0, false);
 }

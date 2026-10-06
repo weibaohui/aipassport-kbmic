@@ -117,7 +117,7 @@ esp_err_t kbmic_action_run(const kbmic_action_t *a)
         case KBMIC_STEP_KEY:
             if (a->trigger == KBMIC_TRIG_TAP) {
                 s_key_held = true;
-                kbmic_hid_key_hold(s->mods, 0, s->keycode, true);
+                kbmic_hid_key_hold(s->mods, s->keycode, true);
             } else {
                 kbmic_hid_tap(s->mods, s->keycode);
             }
@@ -135,14 +135,14 @@ esp_err_t kbmic_action_run(const kbmic_action_t *a)
             break;
 
         case KBMIC_STEP_APPLEFN:
-            // Apple Fn:按住期间把键盘报告第 2 字节置 1(TAP),松手归零。
+            // 按住 Apple Fn:AppleVendor Top Case usage 0x03 放入键盘报告第 2 字节。
             if (a->trigger == KBMIC_TRIG_TAP) {
                 s_applefn_held = true;
-                kbmic_hid_key_hold(0, 1, 0, true);
+                kbmic_hid_applefn(true);
             } else {
-                kbmic_hid_key_hold(0, 1, 0, true);
+                kbmic_hid_applefn(true);
                 vTaskDelay(pdMS_TO_TICKS(ACTION_HOLD_MS));
-                kbmic_hid_key_hold(0, 0, 0, false);
+                kbmic_hid_applefn(false);
             }
             break;
 
@@ -163,7 +163,7 @@ esp_err_t kbmic_action_release(void)
 {
     if (s_key_held) {
         s_key_held = false;
-        kbmic_hid_key_hold(0, 0, 0, false);
+        kbmic_hid_key_hold(0, 0, false);
     }
     if (s_consumer_held) {
         s_consumer_held = false;
@@ -171,7 +171,7 @@ esp_err_t kbmic_action_release(void)
     }
     if (s_applefn_held) {
         s_applefn_held = false;
-        kbmic_hid_key_hold(0, 0, 0, false);
+        kbmic_hid_applefn(false);
     }
     return ESP_OK;
 }
