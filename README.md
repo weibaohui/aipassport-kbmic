@@ -59,7 +59,7 @@ Long-press OK opens the framework settings menu, which includes screen timeout, 
 2. **Key mapping**—3 buttons × 3 slots.
 3. **Action picker**—17 built-in presets, including Enter, Backspace, Tab, Space, Escape, Globe, Ctrl+Win, arrows, F1/F2, Enter ×3, settings, and Apple Fn.
 
-Up/Down move the cursor and OK selects. A `< Back` row moves up one level; long press OK exits the keyboard settings view. The on-device profile list is read-only for creation; use MCP or AI to add a profile. Chinese profile names are supported by the bundled font subset.
+Up/Down move the cursor and OK selects. A `< Back` row moves up one level; long press OK exits the keyboard settings view. The on-device profile list is read-only for creation; use MCP or AI to add a profile. Chinese profile names are supported by the framework's GB2312-coverage 16 px font.
 
 ## Configuration channels
 
@@ -126,7 +126,7 @@ main/
   kbmic_ui.c      home page and keyboard settings views
   kbmic_mcp.c     optional device-side MCP tools
   kbmic_web.c     optional HTTP keyboard settings API
-assets/fonts/     Chinese font subset and generation assets
+assets/fonts/     retained font generation assets and license materials
 mcp_server/       desktop BLE MCP bridge (protocol, BLE transport, tools, tests)
 tools/            gate wrapper and font tooling
 tests/            host tests, HID descriptor checks, UI glyph coverage

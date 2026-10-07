@@ -59,7 +59,7 @@ C 与 Python 各自生成动作显示名，但必须逐字节一致；主机测�
 2. **按键配置**：3 个按键 × 3 个槽。
 3. **选动作**：17 个内置预设，包括 Enter、Backspace、Tab、Space、Esc、Globe、Ctrl+Win、方向键、F1/F2、Enter ×3、设置、Apple Fn。
 
-上下键移动光标，OK 选中。`< 返回` 行回到上一层，长按 OK 退出键盘设置视图。机身模式列表只读，不再提供“新建模式”；如需新增，请使用 AI/MCP。模式名支持中文，界面字体已包含常用汉字子集。
+上下键移动光标，OK 选中。`< 返回` 行回到上一层，长按 OK 退出键盘设置视图。机身模式列表只读，不再提供“新建模式”；如需新增，请使用 AI/MCP。模式名支持中文，界面 16px 字体覆盖 GB2312。
 
 ## 配置通道
 
@@ -126,7 +126,7 @@ main/
   kbmic_ui.c      主页与键盘设置视图
   kbmic_mcp.c     可选设备侧 MCP 工具
   kbmic_web.c     可选 HTTP 键盘设置 API
-assets/fonts/     中文字体子集与生成资产
+assets/fonts/     保留的字体生成资产与许可材料
 mcp_server/       桌面 BLE MCP 桥(协议、BLE 传输、工具、测试)
 tools/            门禁封装与字体工具
 tests/            主机测试、HID 描述符检查、UI 字形覆盖检查

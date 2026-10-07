@@ -8,18 +8,18 @@
 
 | 文件 | 规格 | 用途与来源 |
 | --- | --- | --- |
-| [`fonts/kbmic_charset.txt`](fonts/kbmic_charset.txt) | 纯文本，3616 码点 | 喂给 `lv_font_conv` 的完整符号表 = 95 个可打印 ASCII + 21 个全角标点与界面符号 + 《通用规范汉字表》一级字表 3500 字。**由 `tools/gen_font_charset.py` 生成**，不手抄。 |
+| [`fonts/kbmic_charset.txt`](fonts/kbmic_charset.txt) | 纯文本，3616 码点 | 早期应用自带字体的历史生成输入 = 95 个可打印 ASCII + 21 个全角标点与界面符号 + 《通用规范汉字表》一级字表 3500 字。**由 `tools/gen_font_charset.py` 生成**，不手抄。 |
 | [`fonts/common_3500.txt`](fonts/common_3500.txt) | 纯文本，3500 字 | 通用规范汉字表一级字表。来源：[shengdoushi/common-standard-chinese-characters-table](https://github.com/shengdoushi/common-standard-chinese-characters-table) 的 `level-1.txt`。 |
 | [`fonts/NotoSansSC-Regular.otf`](fonts/NotoSansSC-Regular.otf) | 7.9 MB | 生成字体的源字库，OFL 1.1 许可，许可全文见 [`OFL.txt`](fonts/OFL.txt)。 |
-| [`fonts/app_font_16.c`](fonts/app_font_16.c) | 16 px / 4 bpp / LVGL C 源码 | 界面字体，编译进 `main` 组件。**约 3.0 MB 源文件、编译后约 450 KB Flash**。 |
+| [`fonts/app_font_16.c`](fonts/app_font_16.c) | 16 px / 4 bpp / LVGL C 源码 | 早期应用自带字体的保留生成物。**不再编译**；当前 16px 界面字体由 `components/framework/appfw/fonts/app_font_16.c` 提供。 |
 
-### 为什么要整套 3500 常用字
+### 当前生效字库
 
-用户可以通过 MCP 自建键盘模式并起中文名（「游戏」「会议」「远程」……），名字是**运行时**才出现的，扫源码收集不到。与其猜用户会起什么名，不如把一级字表整套编进字体：多花约 450 KB Flash（分区还剩 76%），换来名字随便起都不出方块。
+当前界面字体由框架提供。16px 字符清单由 GB2312 全部图形字符、可打印 ASCII/空格以及框架既有额外字符生成。运行时自建的中文 profile 名和常见服务端返回的中文都不需要重新生成字体。
 
 界面字体只有一份。标题、主页、设置菜单、模式列表、按键配置、动作选择全部共用它。
 
-### 重新生成
+### 历史资产重新生成
 
 ```bash
 # 1) 重建符号表（改了全角标点或换字表时必做）
@@ -34,11 +34,11 @@ npx lv_font_conv@1.5.3 \
   --output assets/fonts/app_font_16.c
 ```
 
-源字库与字表都随本仓提交（沿用 `aipassport-glm` 的资产约定），所以离线也能重新生成。
+源字库和旧字表仍随本仓提交，便于离线复现历史生成物。当前生效的框架字体请改用 `components/framework/appfw/fonts/gen_fonts.py` 重新生成。
 
 ### 字形覆盖验收
 
-`tests/test_ui_charset.py` 在 host 门禁里检查：**`main/kbmic_ui.c` 字符串字面量里的每个非 ASCII 字符都必须落在 `kbmic_charset.txt` 中**。
+`tests/test_font_gb2312.py` 检查当前 GB2312 字库契约。`tests/test_ui_charset.py` 在 host 门禁里检查上屏字符串中的非 ASCII 字符都落在当前框架字符清单中。
 
 注意它查的不只是汉字——全角冒号、界面自用的 `▸` 光标符号同样会缺字形，漏掉的后果和漏汉字一样。改了界面文案却忘了重新生成字体，门禁会直接失败。
 
