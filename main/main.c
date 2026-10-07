@@ -280,7 +280,12 @@ static void app_task(void *arg)
         refresh_voice_indicator();
         const uint32_t dropped = __atomic_exchange_n(&s_dropped, 0, __ATOMIC_RELAXED);
         if (dropped) ESP_LOGW(TAG, "按键事件队列溢出，丢弃=%" PRIu32, dropped);
-        if (++ticks % 250 == 0) {
+        ++ticks;
+        // appfw 的秒级心跳由应用驱动；这里负责息屏超时、配网完成刷新和门户收尾。
+        if (s_ui_ready && ticks % 50 == 0) {
+            appfw_ui_second_tick();
+        }
+        if (ticks % 250 == 0) {
             ESP_LOGD(TAG, "BLE=%s heap=%u largest=%u",
                      kbmic_hid_connected() ? "connected" : "advertising",
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),

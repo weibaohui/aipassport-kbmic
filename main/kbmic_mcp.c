@@ -848,7 +848,7 @@ static const appfw_mcp_tool_t k_tools[] = {
 void kbmic_mcp_init(void)
 {
     // 内置工具跟随使能位:WiFi 管理 + 设备信息 + 配网状态(取 IP 用)。
-    // 刷新周期/熄屏/亮度是框架 UI 的概念,本应用没有。
+    // 刷新周期/息屏/亮度是框架 UI 的概念,本应用没有。
     appfw_mcp_set_builtin_tools(APPFW_MENU_ITEM_WIFI_MANAGER |
                                 APPFW_MENU_ITEM_DEVICE_INFO |
                                 APPFW_MENU_ITEM_PROVISIONING);
